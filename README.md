@@ -150,3 +150,9 @@ source("taar1-agonists.R")
 - `animal_df_full.csv` — from the GALENOS LSR3 animal analysis: https://github.com/galenos-project/LSR3_taar1_A
 - `human_taar1.csv` — trial-level SMDs extracted from the GALENOS TAAR1 living systematic review (Siafis et al 2024)
 - `taar1_drug_merged.csv` — drug-level aggregation of the animal data used as visible rows in the triangulation plot
+
+---
+
+## AI declaration
+
+AI assistance (Claude, Anthropic) was used in this project to support transparent and structured documentation. Specifically, Claude was used to convert the primary analysis R script (`taar1-agonists.R`) into an R Markdown document (`TAAR1_triangulate_workflow.rmd`) with narrative annotations, section headings, and inline code chunks, producing a self-contained HTML report for ease of use and interpretability. Claude was also used to draft and structure the `README.md` file describing the repository contents, workflow steps, and data provenance. All analytical code, parameter choices, and scientific judgements were written, verified, and approved by the authors. AI-generated text was reviewed and edited prior to inclusion.
