@@ -1,0 +1,525 @@
+---
+title: "Testing the triangulate package for TAAR1 agonists in schizophrenia"
+subtitle: "GALENOS animal-human triangulation workflow with transparent local adaptations"
+author: "Alexandra Bannach-Brown"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = TRUE,
+  collapse = TRUE,
+  comment = "#>"
+)
+
+taar1_script <- readLines("taar1-agonists.R", warn = FALSE)
+
+code_between <- function(start, end = NULL, include_start = TRUE) {
+  start_i <- grep(start, taar1_script, fixed = TRUE)[1]
+  if (is.na(start_i)) {
+    stop("Could not find start marker: ", start)
+  }
+  if (!include_start) {
+    start_i <- start_i + 1
+  }
+  if (is.null(end)) {
+    end_i <- length(taar1_script)
+  } else {
+    end_i <- grep(end, taar1_script, fixed = TRUE)[1] - 1
+    if (is.na(end_i)) {
+      stop("Could not find end marker: ", end)
+    }
+  }
+  taar1_script[start_i:end_i]
+}
+```
+
+<script>
+$(document).ready(function() {
+  function relabelCodeButtons() {
+    $('.code-folding-btn').each(function() {
+      var label = $(this).text().trim();
+      if (label === 'Show') {
+        $(this).text('Show code');
+      }
+      if (label === 'Hide') {
+        $(this).text('Hide code');
+      }
+    });
+  }
+  relabelCodeButtons();
+  $('.code-folding-btn').on('click', function() {
+    setTimeout(relabelCodeButtons, 0);
+  });
+});
+</script>
+
+# Purpose of this document
+
+The aim of this document is to test the `triangulate` R package with a GALENOS use-case, in the triangulation of animal and human evidence on trace amine-associated receptor 1 (TAAR1) agonists for psychosis/schizophrenia.
+
+The clinical and animal context comes from the GALENOS living systematic review on TAAR1 agonism for psychosis and the subsequent GALENOS triangulation work. The TAAR1 review reports that ulotaront and ralmitaront showed few differences versus placebo for overall symptoms in adults with acute schizophrenia, with four studies and 1291 participants giving an SMD around 0.15 with 95% CI roughly -0.05 to 0.34. The triangulation paper describes animal evidence suggesting reduced pro-psychotic drug-induced locomotor activity, while also emphasising risk of bias, reproducibility, translational validity, and interpretability challenges.
+
+Useful sources:
+
+- `triangulate` package documentation - Shapland et al 2024: <https://mrcieu.r-universe.dev/triangulate>
+- "triangulate" preprint - Shapland et al 2024: <https://www.medrxiv.org/content/10.1101/2024.09.20.24314046v1.full.pdf>
+- `triangulate` reference manual: <https://mrcieu.r-universe.dev/triangulate/doc/manual.html>
+- TAAR1 living systematic review - Siafis et al 2024: <https://pmc.ncbi.nlm.nih.gov/articles/PMC11258611/>
+- GALENOS TAAR1 triangulation paper - Smith et al 2025: <https://www.cambridge.org/core/journals/the-british-journal-of-psychiatry/article/triangulating-evidence-from-the-galenos-living-systematic-review-on-trace-amineassociated-receptor-1-taar1-agonists-in-psychosis/B5202B48429F1E700F5274724FB176C0>
+- GALENOS GATE approach paper - Smith et al 2025: <https://www.cambridge.org/core/journals/the-british-journal-of-psychiatry/article/galenos-approach-to-triangulating-evidence-gate-transforming-the-landscape-of-psychiatric-research/94A657ABCCF4755661502785529339E0>
+
+## How this R Markdown file uses the script
+
+The code chunks below are pulled directly from `taar1-agonists.R` with `readLines()`. This avoids having two independent copies of the same analysis code that could become inconsistent.
+When this file is knitted, the HTML runs the full workflow. Code is hidden by default to make the report easier to read, but every code chunk can be opened with the "Show code" button.
+The sourced helper files are shown in an appendix at the end. The most important local helper is `Functions/BiasCorrect_robviz.R`, which contains the amended copy of the plotting function used instead of the package plotting wrapper.
+
+# Package workflow being tested
+
+The `triangulate` documentation describes a workflow in which study-level effect estimates are combined with structured risk-of-bias and indirectness judgements. The core functions used here are:
+
+- `tri_to_long()`: converts wide domain columns such as `d1j`, `d1t`, `d1d` into one row per domain.
+- `tri_dat_check()`: checks that required columns are present.
+- `tri_absolute_direction()`: converts relative qualitative directions such as "Away from null" or "Towards null" into absolute directions usable by the adjustment code.
+- `tri_append_bias()`: joins additive and proportional bias prior parameters to each risk-of-bias domain.
+- `tri_append_indirect()`: joins indirectness prior parameters to indirectness domains.
+- `tri_prep_data()`: aggregates bias and indirectness information and calculates `yi_adj` and `vi_adj`.
+- `tri_plot_bias_direction()`: package plotting approach for original and bias-adjusted estimates. In this project we instead source a local amended version of the internal plotting function, because the TAAR1 use case needs D1-D10 animal risk-of-bias domains, SMD-scale plotting without `exp()`, and external subgroup models.
+
+## Important adaptations for the TAAR1 use case
+
+This analysis is not a direct copy of the package example because the TAAR1 data have features that the example plotting function did not fully cover.
+
+1. Animal data are displayed as 17 drug-level rows, but the subgroup summary should use the original 188-effect multivariate model.
+2. Animal risk of bias has 10 SYRCLE-style domains, so the plot must display D1-D10 rather than D1-D7.
+3. The endpoint is SMD, so original and adjusted values must remain on the SMD scale. The plotting function therefore uses `identity` rather than `exp`.
+4. Animal and human bias priors are defined separately because the empirical uncertainty anchors differ.
+5. No bespoke indirectness assessments are currently available in these files, so explicit "None" indirectness rows are created and still passed through the documented package functions.
+6. The plotting helper has been locally amended to accept externally fitted subgroup summaries. This allows the animal summary to come from `metafor::rma.mv()` and the human summary to come from `meta::metagen()`.
+
+## Local changes to "triangulate" package plotting behaviour
+
+The main package workflow is still used for reshaping, checking, converting directions, appending priors, appending indirectness values, and preparing adjusted estimates. The plotting function was locally adapted because this TAAR1 use case needed behaviour not available in the default exported plotting function.
+
+The local file `Functions/BiasCorrect_robviz.R` amends the plotting behaviour in the following ways:
+
+- Shows D1-D10 risk-of-bias domains, needed for animal studies.
+- Keeps SMD estimates on the identity scale; no `exp()` transformation is applied.
+- Uses symmetric SMD axes around 0 and prints 0 on both original and bias-corrected sides.
+- Separates confidence intervals from the ROB columns so CIs do not run into the traffic-light grid.
+- Allows external subgroup summaries so the animal summary can be an `rma.mv()` model and the human summary can be a `meta::metagen()` model.
+- Allows different external summaries for original and adjusted estimates.
+- Uses shorter adjusted labels and places adjusted subgroup labels near the 0 SMD line.
+- Adds additive/proportional direction icons inside ROB squares:
+  - proportional: `<` and `>`;
+  - additive: `v` and `^`;
+  - unpredictable: `?`.
+- Uses ASCII-safe text so the base R PDF device does not fail on missing fonts.
+
+## Load packages and local helper functions
+
+This section loads packages and sources local helper functions. The comments in the code explain what each sourced file contributes.
+
+```{r packages-and-sources, code=code_between("#### TAAR-1 Triangulation Example", "#### load original animal df")}
+```
+
+
+# Data set-up and formatting
+
+## Read in original animal data for multi-level model
+
+The animal forest plot in the review was based on a multivariate meta-analysis with dependent effect sizes. The visible triangulation plot later uses 17 drug-level rows, but the summary polygon is fitted from the original 188-effect multivariate model. This multivariate model is created below. 
+
+```{r animal-original-model, code=code_between("#### load original animal df", "### Load animal studies")}
+```
+
+## Prepare the animal rows for triangulate
+
+The 17-row animal file has one row per drug-level estimate. The `triangulate` package expects domain columns named like `d1j`, `d1t`, and `d1d`, where:
+
+- `j` is the risk-of-bias judgement.
+- `t` is the type of bias adjustment: additive, proportional, or none.
+- `d` is the direction of bias.
+
+The code below adds missing bias-direction columns, renames verbose SYRCLE columns into `triangulate` format, harmonises judgement labels, and derives an overall worst-case risk-of-bias judgement for each drug.
+
+For the animal domains, the bias type and default direction were chosen using a simple rule: biases that tend to inflate or dilute the size of a treatment difference are treated as proportional, while biases that create a systematic measurement or environmental shift are treated as additive. If the likely direction depends on which group was affected, the default direction is unpredictable.
+
+| Animal domain | Bias type | Default direction | Short rationale |
+|---|---|---|---|
+| D1 Allocation sequence | Proportional | Away from null | Non-random allocation can favour the intervention group and exaggerate treatment effects. |
+| D2 Baseline similarity | Proportional | Unpredictable | Baseline imbalance can favour either treatment or control depending on the imbalance. |
+| D3 Allocation concealment | Proportional | Away from null | Knowledge of allocation can lead to preferential assignment and inflated effects. |
+| D4 Random housing | Additive | Unpredictable | Housing, light, temperature, cage, or stress effects can shift outcomes, but may favour either group. |
+| D5 Caregivers blinded | Proportional | Away from null | Knowledge of treatment may lead to better care or co-interventions for treated animals. |
+| D6 Random outcome assessment | Additive | Unpredictable | Timing, batch, or order effects can shift measurements without a predictable direction. |
+| D7 Outcome assessor blinded | Proportional | Away from null | Unblinded assessment commonly exaggerates apparent group differences. |
+| D8 Incomplete outcome data | Proportional | Unpredictable | Attrition depends on which animals are missing and why. |
+| D9 Selective outcome reporting | Proportional | Away from null | Selecting significant outcomes, timepoints, or analyses tends to inflate effects. |
+| D10 Other bias | Proportional | Unpredictable | Other bias mechanisms are mixed, so the safest default is no fixed direction. |
+
+```{r animal-prep, code=code_between("### Load animal studies", "### Load human RCTs")}
+```
+
+## Prepare the human RCT rows for triangulate
+
+The human CSV contains the study-level SMD (`yi`), standard error (`se`), variance (`vi = se^2`), study labels, and ROB2 judgements. The code below:
+
+- creates `result_id`;
+- converts "Some concerns" to "Moderate";
+- assigns bias types and directions for the ROB2 domains;
+- adds empty D7-D10 columns so human and animal rows can be plotted with the same D1-D10 structure;
+- stops if `yi` or `vi` are missing, or if `vi` does not equal `se^2`.
+
+For the human ROB2 domains, all active domains are coded as proportional because these biases are expected to change the apparent size of the treatment effect rather than add a fixed measurement offset. The default directions are based on pharmacological schizophrenia RCTs using symptom scales such as PANSS or CGI.
+
+| Human domain | Bias type | Default direction | Short rationale |
+|---|---|---|---|
+| D1 Randomization | Proportional | Unpredictable | Baseline imbalance in severity, treatment resistance, illness duration, or concomitant medication can favour either group. |
+| D2 Deviations from intended intervention | Proportional | Towards null | Nonadherence, discontinuation, rescue medication, or treatment contamination usually dilute the contrast between TAAR1 agonist and control. |
+| D3 Missing data | Proportional | Away from null | If nonresponders or poorly tolerated cases leave the active arm, observed efficacy can be overstated; this can be unpredictable if dropout patterns differ. |
+| D4 Outcome measurement | Proportional | Away from null | Symptom ratings are partly subjective, so unblinding or expectations can exaggerate apparent benefit. |
+| D5 Selected reported results | Proportional | Away from null | Selecting favourable timepoints, subscales, analysis sets, or models usually inflates treatment effects. |
+| D6 Period/carryover effects | None | None | Not applicable for these parallel-group RCT rows in this analysis. |
+
+```{r human-prep, code=code_between("### Load human RCTs", "### Check the long-format data expected by triangulate")}
+```
+
+The tables below are printed outside the hidden code chunks so the reader can quickly check the analysis inputs. The animal rows are the 17 drug-level estimates used as visible rows in the triangulation plot. The human rows are trial-level SMDs from `human_taar1.csv`.
+
+```{r input-data-summary, echo=FALSE}
+summarise_rob <- function(x) {
+  tab <- table(as.character(x), useNA = "ifany")
+  paste(paste(names(tab), as.integer(tab), sep = ": "), collapse = "; ")
+}
+
+input_summary <- tibble::tibble(
+  Evidence = c("Animal", "Human RCT"),
+  `Visible rows` = c(nrow(taar1_animal), nrow(taar1_human_4)),
+  `Row meaning` = c("Drug-level animal estimates", "Trial-level clinical SMDs"),
+  `ROB domains plotted` = c(
+    sum(grepl("^d[0-9]+j$", names(taar1_animal))),
+    sum(grepl("^d[0-9]+j$", names(taar1_human_4)))
+  ),
+  `Overall ROB distribution` = c(
+    summarise_rob(taar1_animal$overall),
+    summarise_rob(taar1_human_4$overall)
+  )
+)
+
+knitr::kable(input_summary)
+```
+
+```{r visible-animal-rows, echo=FALSE}
+animal_visible_rows <- taar1_animal %>%
+  transmute(
+    Drug = study,
+    SMD = round(yi, 3),
+    SE = round(sqrt(vi), 3),
+    Variance = round(vi, 4),
+    `Overall ROB` = overall
+  )
+
+knitr::kable(animal_visible_rows)
+```
+
+```{r visible-human-rows, echo=FALSE}
+human_visible_rows <- taar1_human_4 %>%
+  transmute(
+    Study = study_name_drug,
+    SMD = round(yi, 3),
+    SE = round(sqrt(vi), 3),
+    Variance = round(vi, 4),
+    `Overall ROB` = overall
+  )
+
+knitr::kable(human_visible_rows)
+```
+
+
+## Convert to long format and check inputs
+
+The package function `tri_to_long()` reshapes wide domain columns into a long format with one row per result-domain pair. `tri_dat_check()` then checks the structure. These checks are useful because many downstream errors are caused by missing or misspelled `d`, `j`, or `t` columns.
+
+`tri_absolute_direction()` is run and saved into inspectable objects. This is useful for auditing how relative labels such as "Away from null" were converted before priors were joined.
+
+```{r check-and-absolute-direction, code=code_between("### Check the long-format data expected by triangulate", "### Indirectness data")}
+```
+
+
+# Indirectness
+
+## Create explicit indirectness data
+
+There are no bespoke indirectness assessments in the current TAAR1 files. Rather than skipping the indirectness step, the code creates explicit "None" indirectness rows. This keeps the package workflow transparent: indirectness is still represented, checked, transformed with `tri_absolute_direction()`, and joined to `triangulate::dat_ind_values`.
+
+```{r indirectness, code=code_between("### Indirectness data", "### Custom bias priors for animal studies")}
+```
+
+
+# Bias Priors
+
+There is no informaiton in Shapland et al 2024 about how the bias priors were set. 
+Therefore, I set the bias priors empirically anchored to the uncertainty of the random effects meta-analysis; 1.11 SMD (0.84. 1.38) in animal MA, and 0.15 SMD (-0.05, 0.34) in human MA.
+
+The additive bias was scaled to the half-width of the pooled 95% confidence interval, while proportional bias was derived by expressing this quantity relative to the pooled effect estimate. To avoid instability when the pooled effect was close to the null (in the case of the human MA effect estimate), proportional bias was conservatively capped. Bias magnitudes were then scaled across risk-of-bias levels (low, moderate, high, critical) using fixed multipliers. 
+
+To write it with mathematical notation, let $\hat{\mu}$ denote the pooled effect estimate and $(L, U)$ its 95\% confidence interval.
+
+The additive bias magnitude was defined as:
+
+$$
+m_{\text{add}} = \frac{U - L}{2}
+$$
+
+The proportional bias magnitude was defined as:
+
+$$
+m_{\text{prop}} = \frac{m_{\text{add}}}{|\hat{\mu}|}
+$$
+
+Given instability when $|\hat{\mu}| \approx 0$, $m_{\text{prop}}$ was conservatively truncated at a predefined upper bound.
+
+Bias magnitudes for different risk-of-bias levels were obtained by scaling $m_{\text{add}}$ and $m_{\text{prop}}$ by fixed multipliers $(0.25, 0.5, 1, 2)$, with corresponding proportional scaling of variances.
+
+
+## Define animal bias priors
+
+The package documentation describes `tri_append_bias()` as joining prior parameters to risk-of-bias rows based on the domain, judgement, direction, and type. In this TAAR1 application the priors are custom rather than the package defaults.
+
+For animal studies, high risk is anchored to the animal pooled SMD uncertainty. The original animal pooled estimate was approximately SMD 1.11 with a 95% CI from about 0.84 to 1.38. The half-width of that confidence interval is:
+
+```text
+(1.38 - 0.84) / 2 = 0.27
+```
+
+This value is used as the high-risk additive bias mean. In plain terms, a high-risk animal domain is allowed to shift the SMD by about the same amount as the uncertainty around the pooled animal estimate. This is deliberately conservative, because animal studies often have challenges around randomisation, blinding, reporting, dependency among effects, and translational validity.
+
+The proportional high-risk prior is set to 0.24, because the half width of the pooled 95% CIs (0.27) is converted to a fraction of the pooled effect estimate:
+
+```text
+0.27 / 1.11 = 0.24
+```
+
+This says that high risk of bias could plausibly distort the animal effect by about 24% of the pooled effect size.
+
+The practical scaling rule is:
+
+- low = 0.25 x high;
+- moderate = 0.50 x high;
+- high = 1.00 x high;
+- critical = 2.00 x high.
+
+The same scaling is applied to means and variances. Applying the same multiplier to both keeps the prior scale transparent and follows the convention used here that more serious risk of bias means both a larger expected bias and more uncertainty around that expected bias.
+
+Level-by-level rationale:
+
+- Low risk: uses 25% of the high-risk prior. This represents small residual bias. Even low-risk studies may not be completely free of bias, but any bias is assumed unlikely to materially change the estimate.
+- Moderate risk: uses 50% of the high-risk prior. This represents bias that could move the estimate noticeably, but should not dominate the observed effect.
+- High risk: uses the empirical anchor. For additive bias this is SMD 0.27, the half-width of the animal pooled confidence interval. For proportional bias this is 0.24, approximately 24% of the pooled animal SMD.
+- Critical risk: uses 200% of the high-risk prior. This represents an extreme bias scenario where bias could dominate the observed effect.
+
+The resulting animal prior values are:
+
+| Judgement | Additive mean | Additive variance | Proportional mean | Proportional variance |
+|---|---:|---:|---:|---:|
+| Low | 0.0675 | 0.0045 | 0.06 | 0.0035 |
+| Moderate | 0.135 | 0.009 | 0.12 | 0.007 |
+| High | 0.27 | 0.018 | 0.24 | 0.014 |
+| Critical | 0.54 | 0.036 | 0.48 | 0.028 |
+
+```{r animal-priors, code=code_between("### Custom bias priors for animal studies", "### Custom bias priors for human RCTs")}
+```
+
+## Define human bias priors
+
+The human RCTs use a different prior scale because the pooled human SMD is much closer to the null and the uncertainty anchor is different. The target human overall symptoms estimate from the schizophrenia-spectrum RCTs was approximately SMD 0.15 with a 95% CI from about -0.05 to 0.34.
+
+The high-risk additive prior is anchored to the half-width of that confidence interval:
+
+```text
+(0.34 - (-0.05)) / 2 = 0.195
+```
+
+This means a high-risk human ROB domain is allowed to shift the SMD by around 0.195, which is large enough to move a small pooled effect across the null.
+
+The proportional high-risk prior is set to 0.50. A raw ratio based on the small pooled human effect would be unstable:
+
+```text
+0.195 / 0.15 = 1.30
+```
+
+Using 1.30 would imply a proportional distortion larger than the whole estimated effect and would make the adjustment unstable because the pooled effect is close to zero. The prior is therefore capped at 0.50. This still allows a substantial 50% proportional distortion while avoiding an excessive prior driven by division by a near-null effect.
+
+Level-by-level rationale:
+
+- Low risk: uses 25% of high risk. This allows for small residual bias even in trials judged at low risk, but assumes it is unlikely to materially change the effect estimate.
+- Moderate risk: uses 50% of high risk. This represents plausible bias from issues such as deviations from intended intervention, missing data, or measurement/reporting concerns that could shift the estimate but should not dominate it.
+- High risk: uses the empirical uncertainty anchor. Additive high risk is 0.195, the half-width of the human pooled confidence interval. Proportional high risk is capped at 0.50 because the pooled human effect is close to the null.
+- Critical risk: uses 200% of high risk. This allows an extreme bias scenario in which the bias could dominate the observed effect.
+
+The resulting human prior values are:
+
+| Judgement | Additive mean | Additive variance | Proportional mean | Proportional variance |
+|---|---:|---:|---:|---:|
+| Low | 0.04875 | 0.005 | 0.125 | 0.02 |
+| Moderate | 0.0975 | 0.01 | 0.25 | 0.04 |
+| High | 0.195 | 0.02 | 0.50 | 0.08 |
+| Critical | 0.39 | 0.04 | 1.00 | 0.16 |
+
+```{r human-priors, code=code_between("### Custom bias priors for human RCTs", "### Calculate adjusted estimates")}
+```
+
+The next table prints the prior values actually used by the code. This is included so the numerical assumptions are visible even when the code chunks are folded.
+
+```{r prior-values-used, echo=FALSE}
+prior_values_used <- bind_rows(
+  custom_bias_priors_animal %>%
+    mutate(Evidence = "Animal"),
+  custom_bias_priors_human %>%
+    mutate(Evidence = "Human RCT")
+) %>%
+  transmute(
+    Evidence,
+    Judgement = j,
+    `Additive mean` = bias_m_add,
+    `Additive variance` = bias_v_add,
+    `Proportional mean` = bias_m_prop,
+    `Proportional variance` = bias_v_prop
+  )
+
+knitr::kable(prior_values_used)
+```
+
+
+# Calculate adjusted summary estimates (bias-corrected estimates)
+
+`tri_prep_data()` combines the bias rows and indirectness rows and calculates bias-adjusted estimates. The main outputs added by this step are:
+
+- `yi_adj`: adjusted effect estimate;
+- `vi_adj`: adjusted variance.
+
+```{r adjusted-estimates, code=code_between("### Calculate adjusted estimates", "### Animal multivariate summary models for the triangulation plot")}
+```
+
+## Fit the animal multivariate summaries
+
+The package plotting function ordinarily fits subgroup summaries internally with `metafor::rma()`. That was not sufficient for this review because the animal summary estimate should match the original multivariate model fitted to 188 animal effect sizes, not a simple random-effects model fitted to the 17 visible drug-level rows.
+
+This section recreates:
+
+- the original animal `rma.mv()` model using `metafor::vcalc()` and nested random effects;
+- an analogous bias-adjusted `rma.mv()` model after applying the collapsed drug-level ROB judgements to each of the 188 original animal effects.
+
+The resulting summaries are passed into the custom plotting function as external subgroup summaries.
+
+```{r animal-multivariate-summaries, code=code_between("### Animal multivariate summary models for the triangulation plot", "### Combine original wide data with adjusted estimates for plotting")}
+```
+
+## Merge adjusted estimates and fit human summaries
+
+This section joins `yi_adj` and `vi_adj` back to the wide animal and human data. It then fits human original and bias-adjusted subgroup summaries using `meta::metagen()`. These human summaries are also passed to the custom plotting function as external subgroup summaries.
+
+If you want the human triangulation plot to reproduce a specific clinical meta-analysis exactly, the `human_taar1.csv` file must contain `yi` and `se` from that same meta-analysis object. In particular, `vi` must be `se^2`, not `se`.
+
+```{r merge-and-human-summaries, code=code_between("### Combine original wide data with adjusted estimates for plotting", "### Meta-analysis models for explicit inspection")}
+```
+
+The following tables summarise the main estimates used in the final plot. The first table shows the visible rows before and after bias adjustment. The second table shows the externally fitted subgroup summaries used for the animal and human polygons in the plot.
+
+```{r adjusted-visible-row-summary, echo=FALSE}
+visible_adjusted_summary <- taar1_plot_all %>%
+  transmute(
+    Evidence = type,
+    Study = study,
+    `Original SMD` = round(yi, 3),
+    `Original SE` = round(sqrt(vi), 3),
+    `Adjusted SMD` = round(yi_adj, 3),
+    `Adjusted SE` = round(sqrt(vi_adj), 3),
+    `Overall ROB` = overall
+  )
+
+knitr::kable(visible_adjusted_summary)
+```
+
+```{r external-summary-table, echo=FALSE}
+external_summary_table <- bind_rows(
+  external_original_summaries %>%
+    mutate(Panel = "Original"),
+  external_adjusted_summaries %>%
+    mutate(Panel = "Bias-adjusted")
+) %>%
+  transmute(
+    Panel,
+    Evidence = type,
+    Model = label,
+    Estimate = round(yi, 3),
+    `CI lower` = round(ci.lb, 3),
+    `CI upper` = round(ci.ub, 3)
+  )
+
+knitr::kable(external_summary_table)
+```
+
+# Plotting animal and human data together, original and with bias adjustments
+
+The two models are included for inspection and triangulation. The two models combine animal and human rows into one basic random-effects model, 1) before and 2) after bias adjustment. This is not the same as the subgroup summary polygons used in the final plot, because those use externally fitted animal and human models.
+
+```{r inspection-models, code=code_between("### Meta-analysis models for explicit inspection", "### Plot animal and human studies together")}
+```
+
+## Plot the triangulation forest plot
+
+The final plot shows original SMDs, risk-of-bias domains, and bias-adjusted SMDs. The function used here is the locally amended `rob_direction()` from `Functions/BiasCorrect_robviz.R`, not the exported package plotting wrapper.
+
+```{r final-plot, code=code_between("### Plot animal and human studies together")}
+```
+
+The next chunk renders the plot here, using the object created above. 
+
+```{r inline-triangulation-plot, fig.width=18, fig.height=9, out.width="100%"}
+rob_direction(
+  taar1_plot_all,
+  grouping_levels = c("Animal", "RCT"),
+  title = "TAAR1 agonists: animal and human evidence",
+  atransf = identity,
+  external_subgroup_summaries = external_original_summaries,
+  external_subgroup_summaries_adj = external_adjusted_summaries
+)
+
+```
+
+
+
+# Appendix: sourced helper code
+
+The analysis above sources local helper files. They are shown here for transparency. These chunks are not re-executed in the appendix because the relevant files were already sourced by the main analysis code.
+
+## `Functions/BiasCorrect_robviz.R`
+
+```{r appendix-biascorrect-robviz, code=readLines("Functions/BiasCorrect_robviz.R", warn = FALSE), eval=FALSE}
+```
+
+## `Functions/helpers.R`
+
+```{r appendix-helpers, code=readLines("Functions/helpers.R", warn = FALSE), eval=FALSE}
+```
+
+## `Functions/helpers-metafor.R`
+
+```{r appendix-helpers-metafor, code=readLines("Functions/helpers-metafor.R", warn = FALSE), eval=FALSE}
+```
+
+## `Functions/animal-helpers.R`
+
+```{r appendix-animal-helpers, code=readLines("Functions/animal-helpers.R", warn = FALSE), eval=FALSE}
+```
