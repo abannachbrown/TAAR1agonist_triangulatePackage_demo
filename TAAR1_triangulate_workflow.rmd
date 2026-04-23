@@ -79,6 +79,8 @@ Useful sources:
 
 ## How this R Markdown file uses the script
 
+The full source code for this workflow is publicly available on GitHub: <https://github.com/abannachbrown/TAAR1agonist_triangulatePackage_demo>
+
 The code chunks below are pulled directly from `taar1-agonists.R` with `readLines()`. This avoids having two independent copies of the same analysis code that could become inconsistent.
 When this file is knitted, the HTML runs the full workflow. Code is hidden by default to make the report easier to read, but every code chunk can be opened with the "Show code" button.
 The sourced helper files are shown in an appendix at the end. The most important local helper is `Functions/BiasCorrect_robviz.R`, which contains the amended copy of the plotting function used instead of the package plotting wrapper.
