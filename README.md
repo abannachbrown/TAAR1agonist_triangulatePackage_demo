@@ -43,13 +43,19 @@ TAAR1agonist_triangulatePackage_demo/
 ├── human_taar1.csv                  # Trial-level human RCT SMDs
 ├── taar1_drug_merged.csv            # 17 drug-level animal rows for triangulation plot
 ├── TAAR1_triangulate_plot.pdf       # Exported triangulation forest plot
-└── Functions/
-    ├── BiasCorrect_robviz.R         # Custom amended plotting function (main local adaptation)
-    ├── helpers.R                    # ROB judgement/bias-type/direction cleaning
-    ├── helpers-metafor.R            # p-value formatting and polygon annotation helpers
-    ├── animal-helpers.R             # Multivariate animal model and forest-plot helpers
-    └── rob_direction_modi.R         # Supporting plotting utilities
+├── Functions/
+│   ├── BiasCorrect_robviz.R         # Custom amended plotting function (main local adaptation)
+│   ├── helpers.R                    # ROB judgement/bias-type/direction cleaning
+│   ├── helpers-metafor.R            # p-value formatting and polygon annotation helpers
+│   ├── animal-helpers.R             # Multivariate animal model and forest-plot helpers
+│   └── rob_direction_modi.R         # Supporting plotting utilities
+└── sandbox/
+    ├── testing_jarbes.R             # Worked example of the jarbes BC model using the built-in ppvipd dataset
+    ├── taar1_jarbes.R               # jarbes BC model applied to the TAAR1 animal and RCT data
+    └── Verde_2021_suppl.pdf         # Verde (2021) supplementary code used as reference
 ```
+
+---
 
 ### How the .rmd and the .R script relate
 
@@ -150,6 +156,32 @@ source("taar1-agonists.R")
 - `animal_df_full.csv` — from the GALENOS LSR3 animal analysis: https://github.com/galenos-project/LSR3_taar1_A
 - `human_taar1.csv` — trial-level SMDs extracted from the GALENOS TAAR1 living systematic review (Siafis et al 2024)
 - `taar1_drug_merged.csv` — drug-level aggregation of the animal data used as visible rows in the triangulation plot
+
+---
+
+### Sandbox
+
+The `sandbox/` folder contains exploratory scripts that apply a complementary triangulation approach using the [`jarbes`](https://CRAN.R-project.org/package=jarbes) package (Verde 2021, *Biometrical Journal*). This is independent of the `triangulate` package workflow above and is intended for comparison and methodological exploration.
+
+The `jarbes` approach models the animal studies as a potentially biased evidence stream and the human RCTs as the unbiased reference arm. A mixture model with a latent bias indicator separates studies into "unbiased" and "biased" components, and the bias-corrected pooled estimate (`mu[1]`) is the key inferential output.
+
+`sandbox/taar1_jarbes.R` implements four models in sequence:
+
+| Section | Model | Description |
+|---|---|---|
+| 6 | Bayesian RE (RCTs only) | Standard random-effects meta-analysis of the 4 RCTs alone |
+| 6 | Bayesian RE (animal only) | Standard random-effects meta-analysis of the 17 animal estimates alone |
+| 8 | BC (informative prior) | Bias-corrected model; prior on fraction of biased studies anchored to N(animal)/N(total) |
+| 10 | BC (non-informative prior) | Same BC model with Uniform(0,1) prior — tests whether the data alone can identify the bias component |
+| 11 | PBias (ROB covariate) | Extends the BC model by linking each study's probability of being biased to a per-study ROB score via logistic regression (`logit(P[i,2]) = α₀ + α₁·x[i]`) |
+
+The ROB covariate `x[i]` is a 0–1 score derived from available domain judgements:
+- **Animal (SYRCLE):** mean of 10 domains scored `"No"` = 1, `"Unclear"` = 0.5, `"Yes"` = 0
+- **Human (ROB2):** proportion of applicable domains rated `"Some concerns"` or `"High"`
+
+`sandbox/testing_jarbes.R` is a reference implementation of the same models using the `ppvipd` dataset shipped with `jarbes`, following Verde (2021) supplementary code.
+
+Reference: Verde PE (2021). A bias-corrected meta-analysis model for combining studies of different types and quality. *Biometrical Journal* 63(2):406–422. https://doi.org/10.1002/bimj.201900376
 
 ---
 
