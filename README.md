@@ -170,7 +170,7 @@ The `jarbes` approach models the animal studies as a potentially biased evidence
 | Section | Model | Description |
 |---|---|---|
 | 6 | Bayesian RE (RCTs only) | Standard random-effects meta-analysis of the 4 RCTs alone |
-| 6 | Bayesian RE (animal only) | Standard random-effects meta-analysis of the 17 animal estimates alone |
+| 6 | Bayesian RE (animal only) | Standard random-effects meta-analysis of the 17 drug-level animal estimates alone (based on multi-level MA)|
 | 8 | BC (informative prior) | Bias-corrected model; prior on fraction of biased studies anchored to N(animal)/N(total) |
 | 10 | BC (non-informative prior) | Same BC model with Uniform(0,1) prior — tests whether the data alone can identify the bias component |
 | 11 | PBias (ROB covariate) | Extends the BC model by linking each study's probability of being biased to a per-study ROB score via logistic regression (`logit(P[i,2]) = α₀ + α₁·x[i]`) |
