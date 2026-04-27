@@ -1,0 +1,22 @@
+model
+{
+  for (i in 1:N) {
+    # Likelihood: observed effect y[i] with known sampling variance se.y[i]^2
+    y[i]      ~ dnorm(theta[i], pre.y[i])
+    pre.y[i] <- pow(se.y[i], -2)
+
+    # Study-specific random effect drawn from the population distribution
+    theta[i]  ~ dnorm(mu, prec.tau)
+  }
+
+  # Between-study heterogeneity
+  # dscaled.gamma(scale, df) gives a half-Cauchy(scale) marginal prior on tau
+  tau        <- 1 / sqrt(prec.tau)
+  prec.tau   ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+
+  # Pooled effect (population mean)
+  mu         ~ dnorm(0.0, 0.001)
+
+  # Posterior predictive effect for a hypothetical new study
+  theta.new  ~ dnorm(mu, prec.tau)
+}

@@ -1,0 +1,40 @@
+model
+{
+  for (i in 1:N) {
+    # Likelihood: observed effect with known sampling variance
+    y[i]          ~ dnorm(theta.bc[i], pre.y[i])
+    pre.y[i]      <- pow(se.y[i], -2)
+
+    # Mixture: unbiased component (I=0) or biased component (I=1)
+    theta.bc[i]   <- theta[i] * (1 - I[i]) + theta.bias[i] * I[i]
+    I[i]          <- T[i] - 1
+
+    # Component-specific random effects
+    theta[i]      ~ dnorm(mu[1], prec.tau[i])
+    theta.bias[i] ~ dnorm(mu[2], prec.tau[i])
+
+    # Latent study allocation
+    T[i]          ~ dcat(p.bias[1:2])
+
+    # Slash parameterisation: heavier tails for biased component
+    prec.tau[i]   <- inv.var[T[i]] * w[T[i], i]
+    w[1, i]       <- 1
+    w[2, i]       ~ dbeta(nu, 1)
+  }
+
+  nu <- 1/2   # slash shape parameter (Verde 2021)
+
+  # Prior on fraction of biased studies
+  p.bias[2] ~ dbeta(alpha.bias, beta.bias)
+  p.bias[1] <- 1 - p.bias[2]
+
+  # Between-study heterogeneity (shared across components)
+  tau          <- 1 / sqrt(inv.var[1])
+  inv.var[1]   ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+  inv.var[2]   <- inv.var[1]
+
+  # Pooled effects
+  mu[1] ~ dnorm(0.0, 0.01)      # bias-corrected (unbiased component) mean
+  B     ~ dunif(0, B.max)       # systematic bias: B > 0 means animal > RCT
+  mu[2] <- mu[1] + B            # biased component mean
+}
