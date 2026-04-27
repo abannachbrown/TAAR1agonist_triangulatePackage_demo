@@ -567,3 +567,389 @@ cat(sprintf("\n  95%% CrI width: RCT-only = %.3f,  BC mu[1] = %.3f\n",
             width_rct, width_bc))
 cat(sprintf("  Precision gain from BC model: %.1fx narrower\n",
             width_rct / width_bc))
+
+# Save named copies before attach.jags() overwrites mu etc. again
+mu.bc.corrected.inf <- mu.bc.corrected
+B.posterior.inf     <- B.posterior
+p.bias.post.inf     <- p.bias.post
+
+
+# ===========================================================================
+# 10. BC model with non-informative prior on p.bias
+#     ("data-driven" version, following Verde 2021 Section 3.2.2)
+# ===========================================================================
+
+# In the stemcells example Verde uses alpha.bias = beta.bias = 1 (a uniform
+# prior on the fraction of biased studies). This removes any assumption about
+# how many studies are biased and lets the data alone identify the mixture.
+# For TAAR1 this answers: can the observed effect sizes alone separate the
+# two components, without us telling the model that 17/21 are likely biased?
+#
+# The same BC.bugs model is reused; only the hyperparameters change.
+
+data.bc.noninf <- data.bc   # copy sorted y, se.y, N, T, tau priors, B.max
+data.bc.noninf$alpha.bias <- 1
+data.bc.noninf$beta.bias  <- 1
+
+set.seed(2026)
+
+bc.taar1.noninf <- R2jags::jags(
+  data               = data.bc.noninf,
+  inits              = NULL,
+  parameters.to.save = par.bc,
+  model.file         = "BC.bugs",
+  n.chains           = n.chains,
+  n.iter             = 50000,
+  n.thin             = 4,
+  n.burnin           = 20000,
+  DIC                = TRUE
+)
+
+print(bc.taar1.noninf)
+
+attach.jags(bc.taar1.noninf, overwrite = TRUE)
+
+mu.bc.noninf    <- mu[, 1]
+B.noninf        <- B
+p.bias.noninf   <- p.bias[, 2]
+
+cat("\n=================================================\n")
+cat("  BC model (non-informative prior): summaries\n")
+cat("=================================================\n")
+
+cat(sprintf("\n  mu[1]  (bias-corrected pooled SMD):\n"))
+cat(sprintf("    Mean:   %.3f\n",   mean(mu.bc.noninf)))
+cat(sprintf("    95%% CrI: [%.3f, %.3f]\n",
+            quantile(mu.bc.noninf, 0.025),
+            quantile(mu.bc.noninf, 0.975)))
+
+cat(sprintf("\n  B  (systematic bias):\n"))
+cat(sprintf("    Mean:   %.3f\n",   mean(B.noninf)))
+cat(sprintf("    95%% CrI: [%.3f, %.3f]\n",
+            quantile(B.noninf, 0.025),
+            quantile(B.noninf, 0.975)))
+
+cat(sprintf("\n  p.bias  (posterior fraction of biased studies):\n"))
+cat(sprintf("    Mean:   %.3f\n",   mean(p.bias.noninf)))
+cat(sprintf("    95%% CrI: [%.3f, %.3f]\n",
+            quantile(p.bias.noninf, 0.025),
+            quantile(p.bias.noninf, 0.975)))
+
+# Probability that a substantial bias component exists in the data
+# (Verde 2021 diagnostic: P(B > 2*tau))
+tau.noninf    <- tau
+delta.noninf  <- mu[, 2] - mu[, 1]   # = B posterior samples
+cut.point.ni  <- 2 * mean(tau.noninf)
+p.bias.exists <- mean(delta.noninf > cut.point.ni)
+cat(sprintf("\n  P(B > 2*tau) - probability a bias component exists: %.3f\n",
+            p.bias.exists))
+
+# Save named copies
+mu.bc.noninf.saved  <- mu.bc.noninf
+B.noninf.saved      <- B.noninf
+p.bias.noninf.saved <- p.bias.noninf
+
+
+# ===========================================================================
+# 11. PBias model: per-study probability of bias linked to ROB score
+#     (Verde 2021 Section 3.2.6, heart disease / bone marrow example)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 11a. Derive a scalar ROB covariate x[i] for each study
+# ---------------------------------------------------------------------------
+
+# The stemcells example used "number of discrepancies" (Cochrane ROB1 tool)
+# as the covariate x[i]. For TAAR1 we derive an analogous score from the
+# available domain judgements, computed separately per evidence type because
+# the two arms use different column names and different value codings.
+#
+# Animal studies (SYRCLE, taar1_drug_merged.csv):
+#   Columns: "D1 Allocation sequence" ... "D10 Free from other risks of bias"
+#   Values:  "Yes" = low risk (good); "No" = high risk (bad);
+#            "Unclear" = moderate (treated as non-low)
+#   Score:   proportion of the 10 domains coded "No" or "Unclear"
+#
+# Human RCTs (ROB2, human_taar1.csv):
+#   Columns: "Bias due to randomization" ... "Bias due to period and carryover effects"
+#   Values:  "Low" = good; "Some concerns" = moderate; "High" = bad;
+#            "NA" (string) = not applicable (excluded from denominator)
+#   Score:   proportion of applicable domains coded "Some concerns" or "High"
+#
+# Both scores are on the 0-1 scale, so the logistic slope alpha.1 is
+# interpretable uniformly across arms.
+
+# -- Animal ROB score -------------------------------------------------------
+animal_rob_cols <- c(
+  "D1 Allocation sequence",
+  "D2 Baseline similarity",
+  "D3 Allocation concealment",
+  "D4 Random housing",
+  "D5 Caregivers blinded",
+  "D6 Random selection for outcome assessment",
+  "D7 Blinded outcome assessor",
+  "D8 Incomplete data reporting addressed",
+  "D9 Free from selective outcome reporting",
+  "D10 Free from other risks of bias"
+)
+
+animal_rob_scores <- taar1_animal %>%
+  select(name, all_of(animal_rob_cols)) %>%
+  rowwise() %>%
+  mutate(
+    rob_score = {
+      vals <- c_across(all_of(animal_rob_cols))
+      # "No" = high risk (1), "Unclear" = half-point (0.5), "Yes" = low risk (0)
+      mean(dplyr::case_when(
+        vals == "No"      ~ 1,
+        vals == "Unclear" ~ 0.5,
+        vals == "Yes"     ~ 0,
+        TRUE              ~ NA_real_
+      ), na.rm = TRUE)
+    }
+  ) %>%
+  ungroup() %>%
+  select(name, rob_score)
+
+# -- Human ROB score --------------------------------------------------------
+human_rob_cols <- c(
+  "Bias due to randomization",
+  "Bias due to deviations from intended intervention",
+  "Bias due to missing data",
+  "Bias due to outcome measurement",
+  "Bias due to selected reported results",
+  "Bias due to period and carryover effects"
+)
+
+human_rob_scores <- taar1_human %>%
+  select(name, all_of(human_rob_cols)) %>%
+  rowwise() %>%
+  mutate(
+    rob_score = {
+      vals       <- c_across(all_of(human_rob_cols))
+      applicable <- vals[!is.na(vals) & vals != "NA"]
+      if (length(applicable) == 0) NA_real_
+      else mean(applicable %in% c("Some concerns", "High"))
+    }
+  ) %>%
+  ungroup() %>%
+  select(name, rob_score)
+
+# -- Join scores into taar1_sorted ------------------------------------------
+rob_lookup <- bind_rows(animal_rob_scores, human_rob_scores)
+
+taar1_sorted <- taar1_sorted %>%
+  select(-any_of("rob_score")) %>%        # drop the previous all-NA attempt
+  left_join(rob_lookup, by = "name")
+
+cat("\nROB scores (proportion of non-Low / non-Yes domains) by study:\n")
+print(
+  taar1_sorted %>%
+    select(name, design, TE, rob_score) %>%
+    arrange(design, rob_score),
+  n = Inf
+)
+
+# x[i] vector in the same sorted-by-TE order used by y.bc
+x.rob <- taar1_sorted$rob_score
+
+
+# ---------------------------------------------------------------------------
+# 11b. BUGS model: PBias - per-study bias probability via logistic regression
+# ---------------------------------------------------------------------------
+
+# Instead of a single global p.bias[2] ~ Beta(...), the PBias model gives
+# each study its own probability of being in the biased component:
+#
+#   logit(P[i, 2]) = alpha.0 + alpha.1 * x[i]
+#
+# where x[i] is the ROB score for study i.
+#
+# alpha.0: baseline log-odds of bias when ROB score = 0 (all domains Low)
+# alpha.1: change in log-odds per unit increase in ROB score
+#          positive alpha.1 => higher ROB score => higher probability of bias
+#
+# Priors (Verde 2021 defaults, weakly informative on logit scale):
+#   alpha.0 ~ Normal(0, precision=0.1)   [SD ~ 3.16]
+#   alpha.1 ~ Normal(0, precision=0.1)   [SD ~ 3.16]
+#
+# With a 0-1 ROB covariate, a prior SD of ~3 on alpha.1 allows the
+# log-odds to swing by ±3 across the full covariate range -- large enough
+# for the posterior to be data-driven but not completely uninformative.
+
+cat(
+  "model
+{
+  for (i in 1:N) {
+    # Likelihood
+    y[i]        ~ dnorm(theta.bc[i], pre.y[i])
+    pre.y[i]   <- pow(se.y[i], -2)
+
+    # Mixture: unbiased (T=1) or biased (T=2) component
+    theta.bc[i] <- theta[i] * (1 - I[i]) + theta.bias[i] * I[i]
+    I[i]        <- T[i] - 1
+
+    theta[i]      ~ dnorm(mu[1], prec.tau[i])
+    theta.bias[i] ~ dnorm(mu[2], prec.tau[i])
+
+    # Study-specific allocation probability from ROB score
+    T[i] ~ dcat(P[i, 1:2])
+
+    logit(P[i, 2]) <- alpha.0 + alpha.1 * x[i]
+    P[i, 1]        <- 1 - P[i, 2]
+
+    # Slash parameterisation for biased component
+    prec.tau[i] <- inv.var[T[i]] * w[T[i], i]
+    w[1, i]     <- 1
+    w[2, i]     ~ dbeta(nu, 1)
+  }
+
+  nu <- 1/2
+
+  # Logistic regression priors (weakly informative on logit scale)
+  alpha.0 ~ dnorm(prior.mean.alpha.0, prior.scale.alpha.0)
+  alpha.1 ~ dnorm(prior.mean.alpha.1, prior.scale.alpha.1)
+
+  # Between-study heterogeneity
+  tau        <- 1 / sqrt(inv.var[1])
+  inv.var[1] ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+  inv.var[2] <- inv.var[1]
+
+  # Pooled effects
+  mu[1] ~ dnorm(0.0, 0.01)
+  B     ~ dunif(0, B.max)
+  mu[2] <- mu[1] + B
+}",
+  file = "PBias.bugs"
+)
+
+
+# ---------------------------------------------------------------------------
+# 11c. Fit the PBias model
+# ---------------------------------------------------------------------------
+
+data.pbias <- list(
+  y                    = y.bc,
+  se.y                 = se.y.bc,
+  x                    = x.rob,
+  N                    = N.bc,
+  T                    = T.init,
+  scale.sigma.between  = scale.sigma.between,
+  df.scale.between     = df.scale.between,
+  B.max                = B.max,
+  prior.mean.alpha.0   = 0,
+  prior.scale.alpha.0  = 0.1,   # precision = 0.1  =>  SD ~ 3.16
+  prior.mean.alpha.1   = 0,
+  prior.scale.alpha.1  = 0.1
+)
+
+par.pbias <- c(
+  "theta.bc",   # study-level bias-corrected effects
+  "mu",         # mu[1] = bias-corrected pooled SMD
+  "tau",        # between-study SD
+  "P",          # P[i, 2] = per-study probability of being biased
+  "T",          # latent study allocation
+  "w",          # slash weights
+  "B",          # systematic bias
+  "alpha.0",    # logistic intercept
+  "alpha.1"     # logistic slope on ROB score
+)
+
+set.seed(2026)
+
+PBias.taar1 <- R2jags::jags(
+  data               = data.pbias,
+  inits              = NULL,
+  parameters.to.save = par.pbias,
+  model.file         = "PBias.bugs",
+  n.chains           = n.chains,
+  n.iter             = 50000,
+  n.thin             = 4,
+  n.burnin           = 20000,
+  DIC                = TRUE
+)
+
+print(PBias.taar1)
+
+
+# ---------------------------------------------------------------------------
+# 11d. Extract PBias posteriors
+# ---------------------------------------------------------------------------
+
+attach.jags(PBias.taar1, overwrite = TRUE)
+
+mu.pbias      <- mu[, 1]
+B.pbias       <- B
+alpha.0.post  <- alpha.0
+alpha.1.post  <- alpha.1
+
+cat("\n=================================================\n")
+cat("  PBias model: key posterior summaries\n")
+cat("=================================================\n")
+
+cat(sprintf("\n  mu[1]  (bias-corrected pooled SMD):\n"))
+cat(sprintf("    Mean:   %.3f\n",   mean(mu.pbias)))
+cat(sprintf("    95%% CrI: [%.3f, %.3f]\n",
+            quantile(mu.pbias, 0.025),
+            quantile(mu.pbias, 0.975)))
+
+cat(sprintf("\n  B  (systematic bias):\n"))
+cat(sprintf("    Mean:   %.3f\n",   mean(B.pbias)))
+cat(sprintf("    95%% CrI: [%.3f, %.3f]\n",
+            quantile(B.pbias, 0.025),
+            quantile(B.pbias, 0.975)))
+
+cat(sprintf("\n  alpha.0  (logistic intercept):\n"))
+cat(sprintf("    Mean:   %.3f\n",   mean(alpha.0.post)))
+cat(sprintf("    95%% CrI: [%.3f, %.3f]\n",
+            quantile(alpha.0.post, 0.025),
+            quantile(alpha.0.post, 0.975)))
+
+cat(sprintf("\n  alpha.1  (logistic slope on ROB score):\n"))
+cat(sprintf("    Mean:   %.3f\n",   mean(alpha.1.post)))
+cat(sprintf("    95%% CrI: [%.3f, %.3f]\n",
+            quantile(alpha.1.post, 0.025),
+            quantile(alpha.1.post, 0.975)))
+
+# Posterior probability that alpha.1 > 0
+# (positive = higher ROB score associated with higher probability of being biased)
+p_alpha1_pos <- mean(alpha.1.post > 0)
+cat(sprintf("\n  P(alpha.1 > 0): %.3f\n", p_alpha1_pos))
+cat("  [positive = higher ROB score predicts higher probability of being biased]\n")
+
+
+# ---------------------------------------------------------------------------
+# 11e. Per-study posterior probability of bias from PBias model
+# ---------------------------------------------------------------------------
+
+# P[i, 2] is now study-specific (driven by x[i] and alpha.0/alpha.1).
+# Compare with the study-level I[i] from the informative BC model (Section 8).
+
+# P array from JAGS: [n.samples x N x 2]; we want column 2 (biased)
+P.post.mean <- apply(P[, , 2], 2, mean)
+
+study_pbias_summary <- taar1_sorted %>%
+  select(name, design, TE, rob_score) %>%
+  mutate(
+    P_biased_PBias = round(P.post.mean, 3)
+  ) %>%
+  arrange(desc(P_biased_PBias))
+
+cat("\n  Per-study P(biased) from PBias model:\n")
+print(study_pbias_summary)
+
+
+# ---------------------------------------------------------------------------
+# 11f. Full four-model comparison
+# ---------------------------------------------------------------------------
+
+cat("\n=================================================\n")
+cat("  Four-model comparison\n")
+cat("=================================================\n")
+cat("  (all values: posterior mean  [95% CrI])\n\n")
+
+cat(sprintf("  RCT-only RE:              %s\n", fmt(mu.rct)))
+cat(sprintf("  Animal-only RE:           %s\n", fmt(mu.animal)))
+cat(sprintf("  BC (informative prior):   %s\n", fmt(mu.bc.corrected.inf)))
+cat(sprintf("  BC (non-informative):     %s\n", fmt(mu.bc.noninf.saved)))
+cat(sprintf("  PBias (ROB covariate):    %s\n", fmt(mu.pbias)))
