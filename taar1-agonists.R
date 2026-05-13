@@ -392,14 +392,81 @@ taar1_human_prepped <- taar1_human_4 %>%
 
 
 ##################
+### Direct-scale adjustment helper
+
+### triangulate::tri_prep_data() converts summed proportional priors to
+### lognormal moments before calculating adjusted estimates. For SMD outcomes in
+### this TAAR1 workflow, proportional priors are used directly on the effect
+### scale:
+###   B = 1 + p
+###   yi_adj = (yi - A) / B
+###   vi_adj = B^2 * vi + Var(p) * yi_adj^2 + Var(A)
+### where A is the summed additive bias mean and p is the summed proportional
+### bias mean. Bias and indirectness rows are both included, although
+### indirectness is explicitly "None" in this analysis.
+
+tri_prep_data_direct_scale <- function(dat_bias, dat_ind) {
+  additive_bias <- dat_bias %>%
+    group_by(result_id) %>%
+    summarise(
+      bias_add_mean = sum(bias_m_add, na.rm = TRUE),
+      bias_add_var = sum(bias_v_add, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  additive_indirect <- dat_ind %>%
+    group_by(result_id) %>%
+    summarise(
+      ind_add_mean = sum(ind_m_add, na.rm = TRUE),
+      ind_add_var = sum(ind_v_add, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  proportional_bias <- dat_bias %>%
+    group_by(result_id) %>%
+    summarise(
+      bias_prop_mean = sum(bias_m_prop, na.rm = TRUE),
+      bias_prop_var = sum(bias_v_prop, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  proportional_indirect <- dat_ind %>%
+    group_by(result_id) %>%
+    summarise(
+      ind_prop_mean = sum(ind_m_prop, na.rm = TRUE),
+      ind_prop_var = sum(ind_v_prop, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  dat_bias %>%
+    distinct(result_id, study, type, yi, vi) %>%
+    left_join(additive_bias, by = "result_id") %>%
+    left_join(additive_indirect, by = "result_id") %>%
+    left_join(proportional_bias, by = "result_id") %>%
+    left_join(proportional_indirect, by = "result_id") %>%
+    mutate(
+      A = bias_add_mean + ind_add_mean,
+      var_A = bias_add_var + ind_add_var,
+      p = bias_prop_mean + ind_prop_mean,
+      var_p = bias_prop_var + ind_prop_var,
+      B = 1 + p,
+      yi_adj = (yi - A) / B,
+      vi_adj = B^2 * vi + var_p * yi_adj^2 + var_A,
+      yi_adj = if_else(is.finite(yi_adj), yi_adj, NA_real_),
+      vi_adj = if_else(is.finite(vi_adj), vi_adj, NA_real_)
+    )
+}
+
+
+##################
 ### Calculate adjusted estimates
 
-taar1_animal_final <- tri_prep_data(
+taar1_animal_final <- tri_prep_data_direct_scale(
   taar1_animal_prepped,
   taar1_animal_ind
 )
 
-taar1_human_final <- tri_prep_data(
+taar1_human_final <- tri_prep_data_direct_scale(
   taar1_human_prepped,
   taar1_human_ind
 )
@@ -486,7 +553,7 @@ animal_mv_ind <- animal_mv_for_tri %>%
   tri_absolute_direction() %>%
   tri_append_indirect(triangulate::dat_ind_values)
 
-animal_mv_final <- tri_prep_data(animal_mv_bias, animal_mv_ind)
+animal_mv_final <- tri_prep_data_direct_scale(animal_mv_bias, animal_mv_ind)
 
 animal_mv_adjusted_data <- animal_mv_base %>%
   left_join(

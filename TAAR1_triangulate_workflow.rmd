@@ -94,7 +94,7 @@ The `triangulate` documentation describes a workflow in which study-level effect
 - `tri_absolute_direction()`: converts relative qualitative directions such as "Away from null" or "Towards null" into absolute directions usable by the adjustment code.
 - `tri_append_bias()`: joins additive and proportional bias prior parameters to each risk-of-bias domain.
 - `tri_append_indirect()`: joins indirectness prior parameters to indirectness domains.
-- `tri_prep_data()`: aggregates bias and indirectness information and calculates `yi_adj` and `vi_adj`.
+- `tri_prep_data_direct_scale()`: local transparent replacement for `tri_prep_data()` that aggregates bias and indirectness information and calculates `yi_adj` and `vi_adj` using direct-scale proportional factors.
 - `tri_plot_bias_direction()`: package plotting approach for original and bias-adjusted estimates. In this project we instead source a local amended version of the internal plotting function, because the TAAR1 use case needs D1-D10 animal risk-of-bias domains, SMD-scale plotting without `exp()`, and external subgroup models.
 
 ## Important adaptations for the TAAR1 use case
@@ -104,13 +104,73 @@ This analysis is not a direct copy of the package example because the TAAR1 data
 1. Animal data are displayed as 17 drug-level rows, but the subgroup summary should use the original 188-effect multivariate model.
 2. Animal risk of bias has 10 SYRCLE-style domains, so the plot must display D1-D10 rather than D1-D7.
 3. The endpoint is SMD, so original and adjusted values must remain on the SMD scale. The plotting function therefore uses `identity` rather than `exp`.
-4. Animal and human bias priors are defined separately because the empirical uncertainty anchors differ.
-5. No bespoke indirectness assessments are currently available in these files, so explicit "None" indirectness rows are created and still passed through the documented package functions.
-6. The plotting helper has been locally amended to accept externally fitted subgroup summaries. This allows the animal summary to come from `metafor::rma.mv()` and the human summary to come from `meta::metagen()`.
+4. The package's default proportional-bias adjustment was not used for the final estimates, because it converts proportional priors through lognormal/exponential moments and then rescales the variance in a way that is not appropriate for this direct SMD-scale application.
+5. A local transparent replacement, `tri_prep_data_direct_scale()`, is used instead. It applies proportional bias as a direct factor, $B = 1 + p$, and uses the variance formula shown below.
+6. Animal and human bias priors are defined separately because the empirical uncertainty anchors differ.
+7. No bespoke indirectness assessments are currently available in these files, so explicit "None" indirectness rows are created and still passed through the documented package functions.
+8. The plotting helper has been locally amended to accept externally fitted subgroup summaries. This allows the animal summary to come from `metafor::rma.mv()` and the human summary to come from `meta::metagen()`.
+
+## Local changes to proportional-bias adjustment
+
+This is the most important analytical change from the package default. It is described here in three steps: how the issue was noticed, what was changed in the local code, and how the adjusted error bars can be interpreted.
+
+### 1. How the issue was noticed
+
+The issue was noticed because some bias-adjusted confidence intervals became much narrower than expected in a workflow using SMDs on the identity scale.
+
+Inspection of the default package calculation showed that proportional bias parameters were converted using lognormal/exponential scaling. This is appropriate for ratio measures such as odds ratios, risk ratios, or hazard ratios, where effects are commonly analysed on a log scale and then exponentiated for interpretation. It is not appropriate for this application because the outcome is an SMD and the priors were defined as direct proportions of the SMD.
+
+The package variance calculation also divided by the squared proportional scale factor. When the proportional factor is greater than 1, this can shrink the original sampling variance. That behaviour can be algebraically consistent with a proportional-bias model, but it can be visually misleading if the resulting narrower intervals are read as increased study precision.
+
+### 2. What was changed
+
+The code in `taar1-agonists.R` defines a local helper, `tri_prep_data_direct_scale()`, instead of using the default `tri_prep_data()` adjustment. The standard package preparation steps are still retained: `tri_to_long()`, `tri_absolute_direction()`, `tri_append_bias()`, and `tri_append_indirect()`.
+
+The adapted local code handles SMD-scale proportional bias directly:
+
+1. Sum additive bias means and variances across applicable domains to obtain $A$ and $\mathrm{Var}(A)$.
+2. Sum proportional bias means and variances across applicable domains to obtain $p$ and $\mathrm{Var}(p)$.
+3. Define the direct proportional scale factor as:
+
+$$
+B = 1 + p
+$$
+
+4. Adjust the observed effect estimate on the SMD scale:
+
+$$
+y_{\text{adj}} = \frac{y - A}{B} = \frac{y - A}{1 + p}
+$$
+
+5. Propagate uncertainty on the direct scale:
+
+$$
+v_{\text{adj}} = B^2v + \mathrm{Var}(p)y_{\text{adj}}^2 + \mathrm{Var}(A)
+$$
+
+This keeps the proportional factor on the same scale as the SMD prior and adds explicit uncertainty from the proportional and additive bias parameters.
+
+### 3. How to interpret the adjusted error bars
+
+The adjusted error bars should be interpreted as model-based sensitivity intervals, not as evidence that high-risk studies have become more precise after adjustment.
+
+In a proportional-bias model, the observed estimate can be understood as:
+
+$$
+y_{\text{obs}} = B y_{\text{true}} + \epsilon
+$$
+
+If $B > 1$, the model treats the observed estimate as inflated relative to the underlying effect. Solving backwards reduces the point estimate:
+
+$$
+y_{\text{adj}} = \frac{y_{\text{obs}}}{B}
+$$
+
+Under this assumption, some narrowing of the ordinary sampling-error component can still occur. Therefore, narrower adjusted confidence intervals should not be interpreted as meaning that the evidence has become more reliable. They reflect the assumptions of the proportional-bias model plus the specified bias uncertainty. Following Turner et al. (2009)'s general caution about suspected systematic bias, these intervals should be read as conditional sensitivity estimates, and the underlying study limitations remain important.
 
 ## Local changes to "triangulate" package plotting behaviour
 
-The main package workflow is still used for reshaping, checking, converting directions, appending priors, appending indirectness values, and preparing adjusted estimates. The plotting function was locally adapted because this TAAR1 use case needed behaviour not available in the default exported plotting function.
+The main package workflow is still used for reshaping, checking, converting directions, appending priors, and appending indirectness values. The final adjusted estimates are calculated with `tri_prep_data_direct_scale()` as described above. The plotting function was also locally adapted because this TAAR1 use case needed behaviour not available in the default exported plotting function.
 
 The local file `Functions/BiasCorrect_robviz.R` amends the plotting behaviour in the following ways:
 
@@ -273,7 +333,9 @@ There are no bespoke indirectness assessments in the current TAAR1 files. Rather
 There is no informaiton in Shapland et al 2024 about how the bias priors were set. 
 Therefore, I set the bias priors empirically anchored to the uncertainty of the random effects meta-analysis; 1.11 SMD (0.84. 1.38) in animal MA, and 0.15 SMD (-0.05, 0.34) in human MA.
 
-The additive bias was scaled to the half-width of the pooled 95% confidence interval, while proportional bias was derived by expressing this quantity relative to the pooled effect estimate. To avoid instability when the pooled effect was close to the null (in the case of the human MA effect estimate), proportional bias was conservatively capped. Bias magnitudes were then scaled across risk-of-bias levels (low, moderate, high, critical) using fixed multipliers. 
+The additive bias was scaled to the half-width of the pooled 95% confidence interval, while proportional bias was derived by expressing this quantity relative to the pooled effect estimate. To avoid instability when the pooled effect was close to the null (in the case of the human MA effect estimate), proportional bias was conservatively capped. Bias magnitudes were then scaled across risk-of-bias levels (low, moderate, high, critical) using fixed multipliers.
+
+In the default package implementation, summed proportional priors are converted through lognormal moments before adjustment. For this SMD-scale workflow, the code below instead uses the proportional priors directly as direct-scale factors. This corresponds to the calculation used in the "without lognormal conversion" sensitivity example.
 
 To write it with mathematical notation, let $\hat{\mu}$ denote the pooled effect estimate and $(L, U)$ its 95\% confidence interval.
 
@@ -292,6 +354,22 @@ $$
 Given instability when $|\hat{\mu}| \approx 0$, $m_{\text{prop}}$ was conservatively truncated at a predefined upper bound.
 
 Bias magnitudes for different risk-of-bias levels were obtained by scaling $m_{\text{add}}$ and $m_{\text{prop}}$ by fixed multipliers $(0.25, 0.5, 1, 2)$, with corresponding proportional scaling of variances.
+
+The adjusted estimate calculation then uses:
+
+$$
+B = 1 + p
+$$
+
+$$
+y_{\text{adj}} = \frac{y - A}{1 + p}
+$$
+
+$$
+v_{\text{adj}} = (1 + p)^2 v + \mathrm{Var}(p)y_{\text{adj}}^2 + \mathrm{Var}(A)
+$$
+
+Here, $A$ is the summed additive bias mean, $p$ is the summed proportional bias mean, $\mathrm{Var}(A)$ is the summed additive-bias variance, and $\mathrm{Var}(p)$ is the summed proportional-bias variance. The explicit "None" indirectness rows are also included in these sums, but they contribute zero in this analysis.
 
 
 ## Define animal bias priors
@@ -405,7 +483,7 @@ knitr::kable(prior_values_used)
 
 # Calculate adjusted summary estimates (bias-corrected estimates)
 
-`tri_prep_data()` combines the bias rows and indirectness rows and calculates bias-adjusted estimates. The main outputs added by this step are:
+`tri_prep_data_direct_scale()` combines the bias rows and indirectness rows and calculates bias-adjusted estimates using the direct-scale proportional formula above. It is intentionally defined in `taar1-agonists.R` rather than hidden inside the installed package, so the adjustment can be inspected and modified transparently. The main outputs added by this step are:
 
 - `yi_adj`: adjusted effect estimate;
 - `vi_adj`: adjusted variance.
