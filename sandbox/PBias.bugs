@@ -1,0 +1,35 @@
+model
+{
+  for (i in 1:N) {
+    y[i]        ~ dnorm(theta.bc[i], pre.y[i])
+    pre.y[i]   <- pow(se.y[i], -2)
+
+    theta.bc[i] <- theta[i] * (1 - I[i]) + theta.bias[i] * I[i]
+    I[i]        <- T[i] - 1
+
+    theta[i]      ~ dnorm(mu[1], prec.tau[i])
+    theta.bias[i] ~ dnorm(mu[2], prec.tau[i])
+
+    T[i] ~ dcat(P[i, 1:2])
+
+    logit(P[i, 2]) <- alpha.0 + alpha.1 * x[i]
+    P[i, 1]        <- 1 - P[i, 2]
+
+    prec.tau[i] <- inv.var[T[i]] * w[T[i], i]
+    w[1, i]     <- 1
+    w[2, i]     ~ dbeta(nu, 1)
+  }
+
+  nu <- 1/2
+
+  alpha.0 ~ dnorm(prior.mean.alpha.0, prior.scale.alpha.0)
+  alpha.1 ~ dnorm(prior.mean.alpha.1, prior.scale.alpha.1)
+
+  tau        <- 1 / sqrt(inv.var[1])
+  inv.var[1] ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+  inv.var[2] <- inv.var[1]
+
+  mu[1] ~ dnorm(0.0, 0.01)
+  B     ~ dunif(0, B.max)
+  mu[2] <- mu[1] + B
+}

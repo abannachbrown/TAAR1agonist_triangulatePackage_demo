@@ -1,0 +1,984 @@
+---
+title: "Bias-corrected Bayesian meta-analysis for TAAR1 agonists"
+subtitle: "Combining animal and human evidence using the Verde (2021) jarbes framework"
+author: "Alexandra Bannach-Brown"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  comment = "#>",
+  cache   = FALSE
+)
+
+# Helper: one-row posterior summary data frame (bind multiple for a table)
+post_summary <- function(samps, label) {
+  data.frame(
+    Parameter        = label,
+    `Mean [95% CrI]` = sprintf("%.3f [%.3f, %.3f]",
+                               mean(samps),
+                               quantile(samps, 0.025),
+                               quantile(samps, 0.975)),
+    check.names = FALSE
+  )
+}
+```
+
+---
+
+# Purpose
+
+This document demonstrates a **bias-corrected Bayesian meta-analysis** that
+formally combines animal and human evidence on TAAR1 agonists for
+schizophrenia. Rather than analysing the two evidence streams independently and
+comparing results informally, the approach introduced by Verde (2021) treats
+the animal studies as potentially biased observations and uses the human RCTs
+as an anchor to estimate and correct for that bias.
+
+Five models are fitted and compared:
+
+| # | Model | Prior on bias fraction |
+|---|-------|------------------------|
+| 1 | **RCT-only RE** | — (single evidence stream) |
+| 2 | **Animal-only RE** | — (single evidence stream) |
+| 3 | **BC (informative)** | Beta derived from study counts |
+| 4 | **BC (non-informative)** | Beta(1, 1) = Uniform |
+| 5 | **PBias (ROB covariate)** | Logistic regression on ROB score |
+
+**Key references**
+
+- Verde PE (2021). *A bias-corrected meta-analysis model for combining studies
+  of different types and quality.* Biometrical Journal 63(2):406–422.
+  <https://doi.org/10.1002/bimj.201900376>
+- Siafis et al (2024). GALENOS TAAR1 living systematic review.
+  <https://pmc.ncbi.nlm.nih.gov/articles/PMC11258611/>
+- Smith et al (2025). GALENOS TAAR1 triangulation paper.
+  <https://www.cambridge.org/core/journals/the-british-journal-of-psychiatry/article/triangulating-evidence-from-the-galenos-living-systematic-review-on-trace-amineassociated-receptor-1-taar1-agonists-in-psychosis/B5202B48429F1E700F5274724FB176C0>
+
+---
+
+# Statistical framework
+
+## The Verde (2021) bias-correction idea
+
+The core intuition is that animal and human studies measure a related but not
+identical quantity. Animal studies are often inflated by several sources of
+systematic bias (publication pressure, lack of blinding, translational gaps)
+so their pooled effect $\mu_{\text{animal}}$ tends to exceed the clinical
+effect $\mu_{\text{RCT}}$ by a constant amount $B > 0$.
+
+Verde's **bias-corrected (BC) model** captures this with a two-component
+mixture:
+
+$$y_i \sim N(\theta_i^{\text{BC}},\; \sigma_i^2)$$
+
+$$\theta_i^{\text{BC}} = \theta_i\,(1-I_i) + \theta_i^{\text{bias}}\,I_i$$
+
+where $I_i \in \{0,1\}$ is a latent indicator:
+
+- **Component 1** ($I_i=0$, *unbiased*): $\theta_i \sim N(\mu_1, \tau^2)$
+- **Component 2** ($I_i=1$, *biased*): $\theta_i^{\text{bias}}$ follows a
+  **slash distribution** (heavier tails than Normal), centred at
+  $\mu_2 = \mu_1 + B$.
+
+$\mu_1$ is the quantity of interest — the bias-corrected pooled effect. $B$ is
+the estimated systematic inflation across biased studies.
+
+## Analogy to the TAAR1 data
+
+In our dataset the animal studies play the role of "observational" evidence
+and the RCTs play the role of the unbiased reference arm, directly mirroring
+the Verde (2021) `ppvipd` worked example.
+
+## PBias extension
+
+The **PBias model** (Verde 2021, Section 3.2.6) replaces the single global
+bias fraction $p_{\text{bias}}$ with a per-study logistic regression:
+
+$$\text{logit}(P[i, 2]) = \alpha_0 + \alpha_1 x_i$$
+
+where $x_i$ is a study-level risk-of-bias (ROB) score. A positive $\alpha_1$
+means studies with higher ROB scores are more likely to be in the biased
+component.
+
+---
+
+# Packages
+
+```{r packages}
+# Install if needed (comment out once installed):
+# install.packages(c("jarbes", "rjags", "R2jags", "LearnBayes"))
+
+library(jarbes)
+library(rjags)
+library(R2jags)
+library(LearnBayes)
+library(dplyr)
+library(readr)
+library(stringr)
+```
+
+---
+
+# Data
+
+## Animal studies: drug-level SMDs
+
+`taar1_drug_merged.csv` contains one row per drug-level animal meta-analytic
+estimate. The estimates are standardised mean differences (SMDs) on locomotor
+activity, derived from a multivariate Bayesian meta-analysis of SYRCLE-assessed
+animal studies (see `taar1-agonists.R`). The dataset also carries the ten
+SYRCLE domain judgements used later in the PBias model section.
+
+```{r load-animal}
+taar1_animal_raw <- read_csv("taar1_drug_merged.csv")
+
+taar1_animal <- taar1_animal_raw %>%
+  rename(name = DrugName) %>%
+  mutate(
+    design = "Animal",
+    TE     = yi,
+    seTE   = sqrt(vi)
+  ) %>%
+  select(name, design, TE, seTE, everything())
+
+taar1_animal %>%
+  select(name, TE, seTE) %>%
+  mutate(across(c(TE, seTE), \(x) round(x, 3))) %>%
+  knitr::kable(caption = paste0("Animal drug-level SMDs (n = ", nrow(taar1_animal), ")"))
+```
+
+## Human RCTs: trial-level SMDs
+
+`human_taar1.csv` contains four Phase II/III RCTs comparing a TAAR1 agonist
+(ulotaront or ralmitaront) against placebo in adults with acute schizophrenia.
+Effect sizes are SMDs on overall symptom severity (PANSS total or equivalent),
+assessed with ROB2.
+
+```{r load-human}
+taar1_human_raw <- read_csv("human_taar1.csv")
+
+taar1_human <- taar1_human_raw %>%
+  rename(name = study_name_drug) %>%
+  mutate(
+    design = "RCT",
+    TE     = yi,
+    seTE   = sqrt(vi)
+  ) %>%
+  select(name, design, TE, seTE, everything())
+
+taar1_human %>%
+  select(name, TE, seTE) %>%
+  mutate(across(c(TE, seTE), \(x) round(x, 3))) %>%
+  knitr::kable(caption = paste0("Human RCT SMDs (n = ", nrow(taar1_human), ")"))
+```
+
+## Combined dataset
+
+```{r combine-data}
+taar1_combined <- bind_rows(taar1_animal, taar1_human)
+
+taar1_combined %>%
+  group_by(design) %>%
+  summarise(
+    n       = n(),
+    min_TE  = round(min(TE), 3),
+    mean_TE = round(mean(TE), 3),
+    max_TE  = round(max(TE), 3),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(caption = "Effect size range by evidence type (SMD)")
+```
+
+The animal studies tend to show much larger effects than the RCTs
+(mean animal SMD ≈ 1.1 vs mean RCT SMD ≈ 0.15), which is precisely the kind
+of systematic discrepancy the BC model is designed to quantify and correct.
+
+---
+
+# BUGS model: Bayesian random-effects meta-analysis {#re-model}
+
+The Bayesian RE model used for the separate RCT-only and animal-only analyses
+follows Verde (2021, Supplementary). It is a standard normal-normal hierarchical
+model with a **half-Cauchy prior on the between-study SD** $\tau$, implemented
+via `dscaled.gamma(scale, df)` in JAGS.
+
+**Likelihood:**
+$$y_i \mid \theta_i \sim N(\theta_i,\; \sigma_i^2)$$
+
+**Random effects:**
+$$\theta_i \mid \mu, \tau \sim N(\mu, \tau^2)$$
+
+**Priors:**
+$$\mu \sim N(0, 1000), \quad \tau \sim \text{half-Cauchy}(0.5)$$
+
+The half-Cauchy scale of 0.5 SMD units is the Verde (2021) default and is
+weakly informative — it places most prior mass on heterogeneity below 1 SMD
+while allowing larger values.
+
+```{r write-re-model}
+cat(
+  "model
+{
+  for (i in 1:N) {
+    y[i]      ~ dnorm(theta[i], pre.y[i])
+    pre.y[i] <- pow(se.y[i], -2)
+    theta[i]  ~ dnorm(mu, prec.tau)
+  }
+
+  tau        <- 1 / sqrt(prec.tau)
+  prec.tau   ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+
+  mu         ~ dnorm(0.0, 0.001)
+
+  theta.new  ~ dnorm(mu, prec.tau)
+}",
+  file = "meta_bayes.bugs"
+)
+```
+
+`theta.new` is the posterior predictive effect for a hypothetical new study —
+a useful shrinkage estimator for assessing translational generalisability.
+
+## Shared MCMC settings
+
+```{r mcmc-settings}
+n.chains   <- 4
+n.iter     <- 50000
+n.thin     <- 1
+n.burnin   <- 20000
+
+scale.sigma.between <- 0.5   # half-Cauchy scale for tau (Verde 2021 default)
+df.scale.between    <- 1
+
+par.re <- c("theta", "mu", "theta.new", "tau")
+
+set.seed(2026)
+```
+
+---
+
+# Separate RE models: RCT-only and animal-only {#separate-re}
+
+## RCT-only model
+
+```{r fit-rct, cache=TRUE}
+y.rct    <- taar1_human$TE
+se.y.rct <- taar1_human$seTE
+N.rct    <- length(y.rct)
+
+data.rct <- list(
+  y                   = y.rct,
+  se.y                = se.y.rct,
+  N                   = N.rct,
+  scale.sigma.between = scale.sigma.between,
+  df.scale.between    = df.scale.between
+)
+
+m.rct <- R2jags::jags(
+  data               = data.rct,
+  inits              = NULL,
+  parameters.to.save = par.re,
+  model.file         = "meta_bayes.bugs",
+  n.chains           = n.chains,
+  n.iter             = n.iter,
+  n.thin             = n.thin,
+  n.burnin           = n.burnin,
+  DIC                = TRUE
+)
+
+```
+
+<details>
+<summary>Show full JAGS output: RCT-only model</summary>
+```{r print-rct, echo=FALSE, cache=TRUE, cache.extra=m.rct$BUGSoutput$DIC}
+print(m.rct)
+```
+</details>
+
+```{r rct-summary}
+attach.jags(m.rct, overwrite = TRUE)
+mu.rct <- mu
+
+post_summary(mu.rct, "mu – pooled SMD") %>%
+  knitr::kable(caption = "RCT-only model: posterior summary")
+```
+
+With only four trials the posterior is wide, but the mean (~0.15) is
+consistent with the frequentist PANSS meta-analysis from the GALENOS review.
+
+## Animal-only model
+
+```{r fit-animal, cache=TRUE}
+y.animal    <- taar1_animal$TE
+se.y.animal <- taar1_animal$seTE
+N.animal    <- length(y.animal)
+
+data.animal <- list(
+  y                   = y.animal,
+  se.y                = se.y.animal,
+  N                   = N.animal,
+  scale.sigma.between = scale.sigma.between,
+  df.scale.between    = df.scale.between
+)
+
+m.animal <- R2jags::jags(
+  data               = data.animal,
+  inits              = NULL,
+  parameters.to.save = par.re,
+  model.file         = "meta_bayes.bugs",
+  n.chains           = n.chains,
+  n.iter             = n.iter,
+  n.thin             = n.thin,
+  n.burnin           = n.burnin,
+  DIC                = TRUE
+)
+
+```
+
+<details>
+<summary>Show full JAGS output: animal-only model</summary>
+```{r print-animal, echo=FALSE, cache=TRUE, cache.extra=m.animal$BUGSoutput$DIC}
+print(m.animal)
+```
+</details>
+
+```{r animal-summary}
+attach.jags(m.animal, overwrite = TRUE)
+mu.animal <- mu
+
+post_summary(mu.animal, "mu – pooled SMD") %>%
+  knitr::kable(caption = "Animal-only model: posterior summary")
+```
+
+## Comparing the two separate models
+
+```{r compare-separate}
+rct_cri    <- unname(quantile(mu.rct,    probs = c(0.025, 0.975)))
+animal_cri <- unname(quantile(mu.animal, probs = c(0.025, 0.975)))
+
+mu.rct_resamp   <- sample(mu.rct, length(mu.animal), replace = TRUE)
+p_animal_gt_rct <- mean(mu.animal > mu.rct_resamp)
+
+data.frame(
+  Model            = c("RCT-only", "Animal-only"),
+  `Mean [95% CrI]` = c(
+    sprintf("%.3f [%.3f, %.3f]", mean(mu.rct),    rct_cri[1],    rct_cri[2]),
+    sprintf("%.3f [%.3f, %.3f]", mean(mu.animal), animal_cri[1], animal_cri[2])
+  ),
+  `CrI width` = round(c(diff(rct_cri), diff(animal_cri)), 3),
+  check.names = FALSE
+) %>%
+  knitr::kable(
+    caption = paste0(
+      "Separate RE models — P(animal mu > RCT mu) = ",
+      round(p_animal_gt_rct, 3)
+    )
+  )
+```
+
+The posterior probability that the animal pooled effect exceeds the RCT
+pooled effect is very high (~1.0), consistent with the known translational
+inflation pattern. The BC model will estimate this gap as $B$.
+
+---
+
+# BUGS model: Bias-Corrected (BC) model {#bc-model}
+
+The BC model (Verde 2021, Section 2.3) extends the RE model by introducing a
+**latent allocation indicator** $T_i \in \{1, 2\}$ for each study. Studies
+allocated to component 2 (biased) have their effects drawn from a slash
+distribution centred at $\mu_2 = \mu_1 + B$, where $B > 0$ represents the
+systematic upward bias.
+
+**Key structural features:**
+
+- **Slash distribution for biased component**: heavier tails than Normal,
+  implemented as $\text{Normal}(\mu_2,\; \tau^2 / w_i)$ where
+  $w_i \sim \text{Beta}(0.5, 1)$. This prevents a few animal studies with
+  very large effects from pulling the bias estimate.
+- **Identifiability constraint**: studies are sorted by ascending TE before
+  fitting. The study with the smallest TE is fixed to component 1 (unbiased
+  anchor) and the study with the largest TE to component 2 (biased anchor).
+  This breaks label-switching in the JAGS `dcat` sampler.
+- **$B_{\text{max}} = 3$ SMD units**: the observed gap between the animal
+  ($\approx 1.1$) and RCT ($\approx 0.15$) pooled means is ~0.96 SMD, so
+  $B_{\text{max}} = 3$ is deliberately conservative and avoids truncating
+  the prior near the observed difference.
+
+```{r write-bc-model}
+cat(
+  "model
+{
+  for (i in 1:N) {
+    y[i]          ~ dnorm(theta.bc[i], pre.y[i])
+    pre.y[i]      <- pow(se.y[i], -2)
+
+    theta.bc[i]   <- theta[i] * (1 - I[i]) + theta.bias[i] * I[i]
+    I[i]          <- T[i] - 1
+
+    theta[i]      ~ dnorm(mu[1], prec.tau[i])
+    theta.bias[i] ~ dnorm(mu[2], prec.tau[i])
+
+    T[i]          ~ dcat(p.bias[1:2])
+
+    prec.tau[i]   <- inv.var[T[i]] * w[T[i], i]
+    w[1, i]       <- 1
+    w[2, i]       ~ dbeta(nu, 1)
+  }
+
+  nu <- 1/2
+
+  p.bias[2] ~ dbeta(alpha.bias, beta.bias)
+  p.bias[1] <- 1 - p.bias[2]
+
+  tau          <- 1 / sqrt(inv.var[1])
+  inv.var[1]   ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+  inv.var[2]   <- inv.var[1]
+
+  mu[1] ~ dnorm(0.0, 0.01)
+  B     ~ dunif(0, B.max)
+  mu[2] <- mu[1] + B
+}",
+  file = "BC.bugs"
+)
+```
+
+## Prepare the combined sorted dataset
+
+```{r prepare-bc-data}
+taar1_sorted <- taar1_combined %>% arrange(TE)
+
+y.bc    <- taar1_sorted$TE
+se.y.bc <- taar1_sorted$seTE
+N.bc    <- nrow(taar1_sorted)
+
+# Fixed anchors: smallest TE -> unbiased (1), largest TE -> biased (2)
+T.init        <- rep(NA, N.bc)
+T.init[1]     <- 1
+T.init[N.bc]  <- 2
+
+B.max <- 3
+
+bind_rows(head(taar1_sorted, 5), tail(taar1_sorted, 5)) %>%
+  select(name, design, TE, seTE) %>%
+  mutate(across(c(TE, seTE), \(x) round(x, 3))) %>%
+  knitr::kable(caption = "Combined dataset sorted by TE (first 5 and last 5 rows)")
+```
+
+## Informative prior on the bias fraction {#bc-inf}
+
+We follow Verde (2021) and place a Beta prior on $p_{\text{bias}}[2]$ (the
+fraction of biased studies) with:
+
+- **Median** at $(N_{\text{animal}} - 1) / N_{\text{total}}$ ≈ 16/21
+- **90th percentile** at $N_{\text{animal}} / N_{\text{total}}$ ≈ 17/21
+
+This concentrates prior mass around the fraction of animal studies while
+allowing some probability mass above and below — consistent with the
+expectation that most animal studies are biased but not certifying it.
+
+```{r prior-pbias}
+N.ani.bc <- nrow(taar1_animal)
+
+median.prior <- (N.ani.bc - 1) / N.bc
+percentile90 <- N.ani.bc / N.bc
+
+beta.par   <- LearnBayes::beta.select(
+  list(p = 0.50, x = median.prior),
+  list(p = 0.90, x = percentile90)
+)
+alpha.bias <- beta.par[1]
+beta.bias  <- beta.par[2]
+
+data.frame(
+  Quantity = c("Prior median", "Prior 90th percentile", "Beta alpha", "Beta beta"),
+  Value    = round(c(median.prior, percentile90, alpha.bias, beta.bias), 3)
+) %>%
+  knitr::kable(caption = "Informative Beta prior on p.bias")
+```
+
+## Fit the BC model (informative prior)
+
+```{r fit-bc-inf, cache=TRUE}
+data.bc <- list(
+  y                   = y.bc,
+  se.y                = se.y.bc,
+  N                   = N.bc,
+  T                   = T.init,
+  scale.sigma.between = scale.sigma.between,
+  df.scale.between    = df.scale.between,
+  alpha.bias          = alpha.bias,
+  beta.bias           = beta.bias,
+  B.max               = B.max
+)
+
+par.bc <- c(
+  "theta.bc", "theta", "theta.bias",
+  "mu", "tau", "p.bias", "I", "w", "B"
+)
+
+set.seed(2026)
+
+bc.taar1 <- R2jags::jags(
+  data               = data.bc,
+  inits              = NULL,
+  parameters.to.save = par.bc,
+  model.file         = "BC.bugs",
+  n.chains           = n.chains,
+  n.iter             = 50000,
+  n.thin             = 4,
+  n.burnin           = 20000,
+  DIC                = TRUE
+)
+
+```
+
+<details>
+<summary>Show full JAGS output: BC model (informative prior)</summary>
+```{r print-bc-inf, echo=FALSE, cache=TRUE, cache.extra=bc.taar1$BUGSoutput$DIC}
+print(bc.taar1)
+```
+</details>
+
+## BC model results (informative prior)
+
+```{r bc-inf-summary}
+attach.jags(bc.taar1, overwrite = TRUE)
+
+mu.bc.corrected <- mu[, 1]
+mu.bc.biased    <- mu[, 2]
+B.posterior     <- B
+p.bias.post     <- p.bias[, 2]
+eff.unbiased    <- mean((1 - p.bias.post) * N.bc)
+
+bind_rows(
+  post_summary(mu.bc.corrected, "mu[1] — bias-corrected pooled SMD"),
+  post_summary(mu.bc.biased,    "mu[2] — biased component mean"),
+  post_summary(B.posterior,     "B — systematic bias (mu[2] - mu[1])"),
+  post_summary(p.bias.post,     "p.bias — fraction of biased studies")
+) %>%
+  knitr::kable(
+    caption = paste0(
+      "BC model (informative prior) — effective unbiased studies: ",
+      round(eff.unbiased, 1), " of ", N.bc
+    )
+  )
+```
+
+## Study-level posterior probability of being biased
+
+```{r bc-study-bias}
+I.post <- apply(I, 2, mean)
+
+study_bias_summary <- taar1_sorted %>%
+  select(name, design, TE, seTE) %>%
+  mutate(
+    TE       = round(TE, 3),
+    seTE     = round(seTE, 3),
+    P_biased = round(I.post, 3)
+  ) %>%
+  arrange(desc(P_biased))
+
+study_bias_summary %>%
+  head(10) %>%
+  knitr::kable(caption = "Study-level P(biased): top 10 (BC, informative prior)")
+```
+
+Studies with $P(\text{biased}) \approx 1$ are those the model is near-certain
+belong to the inflated component. Expect most animal studies to cluster here.
+RCTs with low ROB2 ratings should have $P(\text{biased})$ close to 0.
+
+```{r save-bc-inf}
+mu.bc.corrected.inf <- mu.bc.corrected
+B.posterior.inf     <- B.posterior
+p.bias.post.inf     <- p.bias.post
+```
+
+---
+
+# BC model with non-informative prior on p.bias {#bc-noninf}
+
+Verde (2021, Section 3.2.2) recommends a sensitivity check using a **Uniform
+prior** on the bias fraction ($\alpha = \beta = 1$). This removes the
+assumption that ~17/21 studies are biased and tests whether the *data alone*
+can separate the two components purely from the observed effect-size
+distribution.
+
+If $\mu_1$ from this model agrees with the informative-prior result, the
+correction is robust to the prior specification.
+
+```{r fit-bc-noninf, cache=TRUE}
+data.bc.noninf            <- data.bc
+data.bc.noninf$alpha.bias <- 1
+data.bc.noninf$beta.bias  <- 1
+
+set.seed(2026)
+
+bc.taar1.noninf <- R2jags::jags(
+  data               = data.bc.noninf,
+  inits              = NULL,
+  parameters.to.save = par.bc,
+  model.file         = "BC.bugs",
+  n.chains           = n.chains,
+  n.iter             = 50000,
+  n.thin             = 4,
+  n.burnin           = 20000,
+  DIC                = TRUE
+)
+
+```
+
+<details>
+<summary>Show full JAGS output: BC model (non-informative prior)</summary>
+```{r print-bc-noninf, echo=FALSE, cache=TRUE, cache.extra=bc.taar1.noninf$BUGSoutput$DIC}
+print(bc.taar1.noninf)
+```
+</details>
+
+```{r bc-noninf-summary}
+attach.jags(bc.taar1.noninf, overwrite = TRUE)
+
+mu.bc.noninf  <- mu[, 1]
+B.noninf      <- B
+p.bias.noninf <- p.bias[, 2]
+
+# Verde (2021) diagnostic: P(B > 2*tau) tests whether a meaningful bias
+# component is supported by the data
+tau.noninf    <- tau
+p.bias.exists <- mean(B.noninf > 2 * mean(tau.noninf))
+
+bind_rows(
+  post_summary(mu.bc.noninf,  "mu[1] — bias-corrected pooled SMD"),
+  post_summary(B.noninf,      "B — systematic bias"),
+  post_summary(p.bias.noninf, "p.bias — fraction of biased studies")
+) %>%
+  knitr::kable(
+    caption = paste0(
+      "BC model (non-informative prior) — P(B > 2τ) = ",
+      round(p.bias.exists, 3)
+    )
+  )
+```
+
+$P(B > 2\tau)$ is the Verde (2021) diagnostic for whether a meaningful bias
+component is present in the data. Values close to 1 indicate the two
+components are well separated.
+
+```{r save-bc-noninf}
+mu.bc.noninf.saved  <- mu.bc.noninf
+B.noninf.saved      <- B.noninf
+p.bias.noninf.saved <- p.bias.noninf
+```
+
+---
+
+# PBias model: per-study bias probability via ROB score {#pbias-rob}
+
+## Deriving the ROB covariate
+
+The PBias model requires a scalar risk-of-bias covariate $x_i \in [0,1]$ for
+each study, where higher values indicate worse quality. The two evidence arms
+use different ROB tools so the score is derived separately and then merged.
+
+### Animal studies (SYRCLE 10-domain tool)
+
+Domain values: **Yes** = low risk (0), **Unclear** = moderate (0.5),
+**No** = high risk (1). The ROB score is the mean across all 10 domains.
+
+```{r rob-animal}
+animal_rob_cols <- c(
+  "D1 Allocation sequence", "D2 Baseline similarity",
+  "D3 Allocation concealment", "D4 Random housing",
+  "D5 Caregivers blinded", "D6 Random selection for outcome assessment",
+  "D7 Blinded outcome assessor", "D8 Incomplete data reporting addressed",
+  "D9 Free from selective outcome reporting", "D10 Free from other risks of bias"
+)
+
+animal_rob_scores <- taar1_animal %>%
+  select(name, all_of(animal_rob_cols)) %>%
+  rowwise() %>%
+  mutate(
+    rob_score = mean(
+      dplyr::case_when(
+        c_across(all_of(animal_rob_cols)) == "No"      ~ 1,
+        c_across(all_of(animal_rob_cols)) == "Unclear" ~ 0.5,
+        c_across(all_of(animal_rob_cols)) == "Yes"     ~ 0,
+        TRUE                                           ~ NA_real_
+      ),
+      na.rm = TRUE
+    )
+  ) %>%
+  ungroup() %>%
+  select(name, rob_score)
+
+animal_rob_scores %>%
+  mutate(rob_score = round(rob_score, 3)) %>%
+  knitr::kable(caption = "SYRCLE ROB scores for animal studies")
+```
+
+### Human RCTs (Cochrane ROB2 tool)
+
+Domain values: **Low** = low risk (0), **Some concerns** or **High** = (1).
+Domains marked **NA** (not applicable) are excluded from the denominator.
+
+```{r rob-human}
+human_rob_cols <- c(
+  "Bias due to randomization",
+  "Bias due to deviations from intended intervention",
+  "Bias due to missing data",
+  "Bias due to outcome measurement",
+  "Bias due to selected reported results",
+  "Bias due to period and carryover effects"
+)
+
+human_rob_scores <- taar1_human %>%
+  select(name, all_of(human_rob_cols)) %>%
+  rowwise() %>%
+  mutate(
+    rob_score = {
+      vals       <- c_across(all_of(human_rob_cols))
+      applicable <- vals[!is.na(vals) & vals != "NA"]
+      if (length(applicable) == 0) NA_real_
+      else mean(applicable %in% c("Some concerns", "High"))
+    }
+  ) %>%
+  ungroup() %>%
+  select(name, rob_score)
+
+human_rob_scores %>%
+  mutate(rob_score = round(rob_score, 3)) %>%
+  knitr::kable(caption = "ROB2 scores for human RCTs")
+```
+
+### Join ROB scores into the sorted dataset
+
+```{r merge-rob}
+rob_lookup <- bind_rows(animal_rob_scores, human_rob_scores)
+
+taar1_sorted <- taar1_sorted %>%
+  select(-any_of("rob_score")) %>%
+  left_join(rob_lookup, by = "name")
+
+taar1_sorted %>%
+  select(name, design, TE, rob_score) %>%
+  arrange(design, rob_score) %>%
+  mutate(TE = round(TE, 3), rob_score = round(rob_score, 3)) %>%
+  knitr::kable(caption = "ROB scores by study (sorted by design then score)")
+
+x.rob <- taar1_sorted$rob_score
+```
+
+## BUGS model: PBias
+
+The structure is identical to the BC model except that the global
+$p_{\text{bias}}[2] \sim \text{Beta}(\cdot)$ is replaced by a per-study
+logistic regression on the ROB score:
+
+$$\text{logit}(P[i, 2]) = \alpha_0 + \alpha_1 x_i$$
+
+Priors on the logistic coefficients follow Verde (2021): $\text{Normal}(0,
+\text{precision} = 0.1)$, giving $\text{SD} \approx 3.16$ on the logit scale —
+weakly informative but allowing the log-odds to move freely across the
+covariate range.
+
+```{r write-pbias-model}
+cat(
+  "model
+{
+  for (i in 1:N) {
+    y[i]        ~ dnorm(theta.bc[i], pre.y[i])
+    pre.y[i]   <- pow(se.y[i], -2)
+
+    theta.bc[i] <- theta[i] * (1 - I[i]) + theta.bias[i] * I[i]
+    I[i]        <- T[i] - 1
+
+    theta[i]      ~ dnorm(mu[1], prec.tau[i])
+    theta.bias[i] ~ dnorm(mu[2], prec.tau[i])
+
+    T[i] ~ dcat(P[i, 1:2])
+
+    logit(P[i, 2]) <- alpha.0 + alpha.1 * x[i]
+    P[i, 1]        <- 1 - P[i, 2]
+
+    prec.tau[i] <- inv.var[T[i]] * w[T[i], i]
+    w[1, i]     <- 1
+    w[2, i]     ~ dbeta(nu, 1)
+  }
+
+  nu <- 1/2
+
+  alpha.0 ~ dnorm(prior.mean.alpha.0, prior.scale.alpha.0)
+  alpha.1 ~ dnorm(prior.mean.alpha.1, prior.scale.alpha.1)
+
+  tau        <- 1 / sqrt(inv.var[1])
+  inv.var[1] ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+  inv.var[2] <- inv.var[1]
+
+  mu[1] ~ dnorm(0.0, 0.01)
+  B     ~ dunif(0, B.max)
+  mu[2] <- mu[1] + B
+}",
+  file = "PBias.bugs"
+)
+```
+
+## Fit the PBias model
+
+```{r fit-pbias, cache=TRUE}
+data.pbias <- list(
+  y                   = y.bc,
+  se.y                = se.y.bc,
+  x                   = x.rob,
+  N                   = N.bc,
+  T                   = T.init,
+  scale.sigma.between = scale.sigma.between,
+  df.scale.between    = df.scale.between,
+  B.max               = B.max,
+  prior.mean.alpha.0  = 0,
+  prior.scale.alpha.0 = 0.1,   # precision = 0.1  =>  SD ~ 3.16
+  prior.mean.alpha.1  = 0,
+  prior.scale.alpha.1 = 0.1
+)
+
+par.pbias <- c(
+  "theta.bc", "mu", "tau",
+  "P", "T", "w", "B",
+  "alpha.0", "alpha.1"
+)
+
+set.seed(2026)
+
+PBias.taar1 <- R2jags::jags(
+  data               = data.pbias,
+  inits              = NULL,
+  parameters.to.save = par.pbias,
+  model.file         = "PBias.bugs",
+  n.chains           = n.chains,
+  n.iter             = 50000,
+  n.thin             = 4,
+  n.burnin           = 20000,
+  DIC                = TRUE
+)
+
+```
+
+<details>
+<summary>Show full JAGS output: PBias model</summary>
+```{r print-pbias, echo=FALSE, cache=TRUE, cache.extra=PBias.taar1$BUGSoutput$DIC}
+print(PBias.taar1)
+```
+</details>
+
+## PBias model results
+
+```{r pbias-summary}
+attach.jags(PBias.taar1, overwrite = TRUE)
+
+mu.pbias     <- mu[, 1]
+B.pbias      <- B
+alpha.0.post <- alpha.0
+alpha.1.post <- alpha.1
+
+p_alpha1_pos <- mean(alpha.1.post > 0)
+
+bind_rows(
+  post_summary(mu.pbias,     "mu[1] — bias-corrected pooled SMD"),
+  post_summary(B.pbias,      "B — systematic bias"),
+  post_summary(alpha.0.post, "alpha.0 — logistic intercept"),
+  post_summary(alpha.1.post, "alpha.1 — logistic slope on ROB score")
+) %>%
+  knitr::kable(
+    caption = paste0(
+      "PBias model — P(α₁ > 0) = ", round(p_alpha1_pos, 3),
+      "  [positive = higher ROB score predicts higher P(biased)]"
+    )
+  )
+```
+
+## Per-study P(biased) from PBias model
+
+```{r pbias-study-probs}
+P.post.mean <- apply(P[, , 2], 2, mean)
+
+study_pbias_summary <- taar1_sorted %>%
+  select(name, design, TE, rob_score) %>%
+  mutate(
+    TE             = round(TE, 3),
+    rob_score      = round(rob_score, 3),
+    P_biased_PBias = round(P.post.mean, 3)
+  ) %>%
+  arrange(desc(P_biased_PBias))
+
+study_pbias_summary %>%
+  knitr::kable(caption = "Per-study P(biased) from PBias model")
+```
+
+---
+
+# Final comparison across all models {#final-comparison}
+
+```{r final-comparison}
+width_rct <- diff(quantile(mu.rct,              probs = c(0.025, 0.975)))
+width_bc  <- diff(quantile(mu.bc.corrected.inf, probs = c(0.025, 0.975)))
+
+bind_rows(
+  post_summary(mu.rct,              "1. RCT-only RE"),
+  post_summary(mu.animal,           "2. Animal-only RE"),
+  post_summary(mu.bc.corrected.inf, "3. BC (informative prior)"),
+  post_summary(mu.bc.noninf.saved,  "4. BC (non-informative prior)"),
+  post_summary(mu.pbias,            "5. PBias (ROB covariate)")
+) %>%
+  knitr::kable(caption = "Bias-corrected pooled SMD across all models")
+```
+
+```{r final-comparison-bias}
+bind_rows(
+  post_summary(B.posterior.inf, "BC (informative prior)"),
+  post_summary(B.noninf.saved,  "BC (non-informative prior)"),
+  post_summary(B.pbias,         "PBias (ROB covariate)")
+) %>%
+  knitr::kable(caption = "Estimated systematic bias B across BC models")
+```
+
+The BC model narrows the 95% CrI on the pooled SMD from
+`r round(width_rct, 3)` (RCT-only) to `r round(width_bc, 3)` (BC $\mu_1$),
+a `r round(width_rct / width_bc, 1)`× gain in precision from formally
+borrowing the animal evidence while correcting for its bias.
+
+## Interpretation
+
+The two tables above allow us to answer three questions simultaneously:
+
+1. **Does the BC model recover the RCT estimate after correction?**
+   $\mu_1$ from the BC models should be close to the RCT-only pooled effect.
+   Agreement across informative and non-informative priors strengthens
+   confidence in the correction.
+
+2. **How large is the systematic bias?**
+   $B$ is the posterior estimate of how much the animal studies systematically
+   over-estimate the true effect. A large $B$ with a narrow CrI indicates the
+   mixture components are well separated.
+
+3. **Does the ROB score predict bias?**
+   A positive $\alpha_1$ in the PBias model with $P(\alpha_1 > 0)$ close to 1
+   would confirm that studies with higher ROB scores are more likely to belong
+   to the inflated component — validating the use of SYRCLE/ROB2 assessments
+   as a quantitative bias covariate.
+
+---
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```

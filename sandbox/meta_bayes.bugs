@@ -1,0 +1,15 @@
+model
+{
+  for (i in 1:N) {
+    y[i]      ~ dnorm(theta[i], pre.y[i])
+    pre.y[i] <- pow(se.y[i], -2)
+    theta[i]  ~ dnorm(mu, prec.tau)
+  }
+
+  tau        <- 1 / sqrt(prec.tau)
+  prec.tau   ~ dscaled.gamma(scale.sigma.between, df.scale.between)
+
+  mu         ~ dnorm(0.0, 0.001)
+
+  theta.new  ~ dnorm(mu, prec.tau)
+}
