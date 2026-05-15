@@ -668,6 +668,11 @@ risk ratios, or hazard ratios, where effects are commonly analysed on a
 log scale and then exponentiated for interpretation. It is not
 appropriate for this application because the outcome is an SMD and the
 priors were defined as direct proportions of the SMD.</p>
+<p>The additive bias terms were different: in the package default they
+were already summed directly on the effect scale, without lognormal or
+exponential conversion. The local code therefore does not need a
+separate scale correction for additive priors; it keeps them as direct
+SMD shifts and adds their variances directly.</p>
 <p>The package variance calculation also divided by the squared
 proportional scale factor. When the proportional factor is greater than
 1, this can shrink the original sampling variance. That behaviour can be
